@@ -1,6 +1,6 @@
 # Tunneler — 실시간 대시보드를 갖춘 리버스 터널러
 
-사설망에서도 손쉽게 포트를 터널링하는 경량 리버스 터널러 & 대시보드(실시간 대역폭·로그·IP/시간제한), 서버/클라이언트(리눅스·macOS·윈도우) 구현
+사설망에서도 손쉽게 포트를 터널링하는 리버스 터널러 & 대시보드(실시간 대역폭·로그·IP/시간제한), 서버/클라이언트(리눅스·macOS·윈도우) 구현
 
 ---
 
@@ -9,7 +9,8 @@
 
 ## ✨ 주요 기능
 
-<img width="1299" height="1287" alt="image" src="https://github.com/user-attachments/assets/e91fec3a-d606-40ac-a25a-6a5086cdc22f" />
+<img width="1286" height="1282" alt="image" src="https://github.com/user-attachments/assets/8f3750ab-c780-4c37-9df8-85862d681f8e" />
+
 
 -   **멀티 프로토콜**: TCP / UDP / HTTP 프록시 지원
 -   **자동 포트 할당**: 서버가 가용 포트를 자동으로 선택하여 클라이언트에 할당
