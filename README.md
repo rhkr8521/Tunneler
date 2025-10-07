@@ -163,3 +163,64 @@
 
 -   개발/테스트 목적이 아니라면 **토큰 화이트리스트를 절대로 비워두지 마세요.**
 -   대시보드 비밀번호를 복잡하게 설정하고, **IP 차단 목록을 함께 사용**하여 접근을 최소화하세요.
+
+---
+
+## 라이선스 (License)
+
+이 프로젝트는 다음과 같은 오픈소스 라이브러리를 사용하고 있습니다. 각 라이브러리의 라이선스 조항을 준수하기 위해 아래에 해당 라이선스 원문을 포함합니다.
+
+### Apache License 2.0
+
+`aiohttp`와 그 의존성 라이브러리인 `yarl`, `multidict`, `frozenlist` 등은 Apache License 2.0을 따릅니다.
+
+<details>
+<summary>Apache License 2.0 전문 보기</summary>
+
+```
+   Copyright 2024 Your Name or Company Name
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+```
+
+</details>
+
+### MIT License
+
+`aiohttp`의 의존성 라이브러리인 `attrs`는 MIT License를 따릅니다.
+
+<details>
+<summary>MIT License 전문 보기</summary>
+
+```
+Copyright (c) 2015-present Hynek Schlawack
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+</details>
