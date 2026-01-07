@@ -34,7 +34,7 @@ cat > "$ENV_FILE" <<EOF
 WS_URL=${WS_URL}
 SUBDOMAIN=${SUBDOMAIN}
 TOKEN=${TOKEN}
-EXTRA_ARGS=$(echo "$EXTRA_ARGS" | xargs)
+EXTRA_ARGS="$(echo "$EXTRA_ARGS" | xargs)"
 EOF
 chmod 600 "$ENV_FILE"
 
