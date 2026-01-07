@@ -81,13 +81,13 @@ jobs:
 
       - name: Publish APT repo into gh-pages ./repo
         run: |
-          chmod +x scripts/apt_repo_publish.sh
+          chmod +x packaging/server/rootfs/scripts/apt_repo_publish.sh
           ls -al dist
           # dist 안에 여러 deb가 있으니 전부 publish 스크립트를 돌린다
           # (스크립트가 1개 deb만 받게 되어있어서 루프)
           for deb in dist/*.deb; do
             echo "[PUBLISH] $deb"
-            ./scripts/apt_repo_publish.sh "$deb" repo
+            packaging/server/rootfs/scripts/apt_repo_publish.sh "$deb" repo
           done
 
       - name: Commit & push gh-pages
