@@ -1,4 +1,4 @@
-name: Build .deb and publish APT (GitHub Pages)
+name: build-and-publish
 
 on:
   push:
@@ -9,67 +9,92 @@ permissions:
   contents: write
 
 jobs:
-  build-and-publish:
+  build:
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Extract version
-        id: ver
+      - name: Build .deb (amd64 + arm64)
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          chmod +x packaging/server/rootfs/scripts/build_deb.sh
+          VER="${GITHUB_REF_NAME#v}"
+          packaging/server/rootfs/scripts/build_deb.sh "$VER" --multi "amd64 arm64"
+          ls -al dist
 
-      - name: Install build deps
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-debs
+          path: dist/*.deb
+
+      - name: GitHub Release (attach debs)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+
+  publish-apt:
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      # gh-pages 브랜치 체크아웃 (repo 폴더를 여기 커밋할 거임)
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      # build job 산출물 가져오기
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-debs
+          path: dist
+
+      - name: Install repo tools
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev apt-utils gnupg
 
-      - name: Build deb
+      - name: Import GPG key
         run: |
-          chmod +x packaging/server/rootfs/scripts/build_deb.sh
-          VER="${GITHUB_REF_NAME#v}"
-          packaging/server/rootfs/scripts/build_deb.sh "$VER"
-
-      - name: Create GitHub Release and upload deb
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.deb
-
-      # ---- gh-pages로 APT repo 업데이트 ----
-      - name: Checkout gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: repo
-
-      - name: Import GPG key for APT signing
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$APT_GPG_OWNERTRUST" | gpg --batch --import-ownertrust
+          gpg --list-secret-keys --keyid-format LONG
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
-          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
-            echo "[ERROR] Missing secret: APT_GPG_PRIVATE_KEY"
-            exit 1
-          fi
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          gpg --list-secret-keys --keyid-format LONG
+          APT_GPG_OWNERTRUST: ${{ secrets.APT_GPG_OWNERTRUST }}
 
-      - name: Update APT repo metadata + sign
-        working-directory: packaging/server/rootfs
-        run: |
-          chmod +x scripts/apt_repo_publish.sh
-          DEB="$(ls dist/*.deb | head -n1)"
-          ./scripts/apt_repo_publish.sh "$DEB" repo
+      # gh-pages 브랜치에는 scripts가 없을 수 있으니,
+      # main에서 scripts/apt_repo_publish.sh를 가져오는 대신,
+      # 여기서는 워크플로우에서 직접 생성하지 않고
+      # "gh-pages에도 scripts를 두거나" / "publish 스크립트를 inline으로 넣어야" 함.
+      #
+      # 가장 단순한 방법: gh-pages에도 scripts/apt_repo_publish.sh를 포함시키기.
+      # (gh-pages는 repo/만 있어야 한다는 강박 버리고, scripts는 있어도 됨)
+      #
+      # 만약 정말 gh-pages에 scripts를 안 두고 싶으면,
+      # publish job에서 main을 추가 checkout해서 스크립트만 복사해 쓰면 됨.
 
-      - name: Commit & Push gh-pages
+      - name: Checkout main to get scripts
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Publish APT repo into gh-pages ./repo
         run: |
-          cd repo
+          chmod +x main/scripts/apt_repo_publish.sh
+          ls -al dist
+          # dist 안에 여러 deb가 있으니 전부 publish 스크립트를 돌린다
+          # (스크립트가 1개 deb만 받게 되어있어서 루프)
+          for deb in dist/*.deb; do
+            echo "[PUBLISH] $deb"
+            main/scripts/apt_repo_publish.sh "$deb" repo
+          done
+
+      - name: Commit & push gh-pages
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "APT: publish ${{ steps.ver.outputs.version }}" || exit 0
+          git add repo
+          git commit -m "apt: publish ${GITHUB_REF_NAME}" || exit 0
           git push
+
