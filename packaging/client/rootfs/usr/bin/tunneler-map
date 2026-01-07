@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 설정 파일 경로
+ENV_FILE="/etc/default/tunneler-client"
+
+# 권한 및 파일 존재 확인
+[[ $EUID -ne 0 ]] && { echo "sudo 권한이 필요합니다."; exit 1; }
+[[ -f "$ENV_FILE" ]] || { echo "설정 파일이 없습니다."; exit 1; }
+
+# 현재 설정 로드
+# shellcheck disable=SC1091
+source "$ENV_FILE"
+
+echo "=== Tunneler 매핑 수정 (TCP/UDP/HTTP) ==="
+echo "현재 설정: $EXTRA_ARGS"
+echo
+
+# 사용자 입력 받기
+read -rp "수정할 HTTP 대상 (예: http://127.0.0.1:80, 삭제하려면 'del' 입력, 넘기려면 Enter): " HTTP_VAL
+read -rp "추가할 TCP (예: web=127.0.0.1:80): " TCP_ADD
+read -rp "삭제할 TCP 이름 (예: web): " TCP_DEL
+read -rp "추가할 UDP (예: dns=127.0.0.1:53): " UDP_ADD
+read -rp "삭제할 UDP 이름 (예: dns): " UDP_DEL
+
+NEW_ARGS="$EXTRA_ARGS"
+
+# 1. HTTP 처리 (단일 대상을 교체하거나 삭제)
+if [[ "$HTTP_VAL" == "del" ]]; then
+    NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--http [^ ]*##g")
+elif [[ -n "$HTTP_VAL" ]]; then
+    # 기존 http 제거 후 새 값 추가
+    NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--http [^ ]*##g")
+    NEW_ARGS+=" --http ${HTTP_VAL}"
+fi
+
+# 2. TCP 삭제 처리
+for name in $(echo "${TCP_DEL}" | tr ',' ' '); do
+    NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--tcp ${name}=[^ ]*##g")
+done
+
+# 3. TCP 추가 처리
+for kv in $(echo "${TCP_ADD}" | tr ',' ' '); do
+    if [[ "$kv" == *"="* ]]; then
+        name="${kv%%=*}"
+        NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--tcp ${name}=[^ ]*##g")
+        NEW_ARGS+=" --tcp ${kv}"
+    fi
+done
+
+# 4. UDP 삭제 처리
+for name in $(echo "${UDP_DEL}" | tr ',' ' '); do
+    NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--udp ${name}=[^ ]*##g")
+done
+
+# 5. UDP 추가 처리
+for kv in $(echo "${UDP_ADD}" | tr ',' ' '); do
+    if [[ "$kv" == *"="* ]]; then
+        name="${kv%%=*}"
+        NEW_ARGS=$(echo "$NEW_ARGS" | sed -E "s#--udp ${name}=[^ ]*##g")
+        NEW_ARGS+=" --udp ${kv}"
+    fi
+done
+
+# 6. 저장 및 서비스 재시작
+# xargs를 사용해 불필요한 공백을 제거하고 따옴표 없이 저장합니다[cite: 1, 4, 5].
+FINAL_ARGS=$(echo "$NEW_ARGS" | xargs)
+sed -i "s|^EXTRA_ARGS=.*|EXTRA_ARGS=${FINAL_ARGS}|" "$ENV_FILE"
+
+echo "[정보] 서비스를 재시작합니다..."
+systemctl restart tunneler-client
+echo "[OK] 업데이트 완료."

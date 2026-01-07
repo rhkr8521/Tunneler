@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+if [ -f /etc/default/tunneler-client ]; then exit 0; fi
+
+db_input high tunneler-client/server_url || true
+db_input high tunneler-client/use_ssl || true
+db_input high tunneler-client/subdomain || true
+db_input high tunneler-client/token || true
+db_input high tunneler-client/http_base || true
+db_input high tunneler-client/tcp_maps || true
+db_input high tunneler-client/udp_maps || true
+db_go || true

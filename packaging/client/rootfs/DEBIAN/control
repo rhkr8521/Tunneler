@@ -1,0 +1,9 @@
+Package: tunneler-client
+Version: 1.2.1
+Section: net
+Priority: optional
+Architecture: all
+Maintainer: rhkr8521 <rhkr8521@rhkr8521.com>
+Depends: bash, python3, python3-venv, python3-pip, systemd, debconf, curl
+Description: Tunneler Client for TCP/UDP/HTTP Tunneling
+ Installs Tunneler client as a systemd service with venv.

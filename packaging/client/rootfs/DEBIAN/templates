@@ -1,0 +1,29 @@
+Template: tunneler-client/server_url
+Type: string
+Default: example.com
+Description: Tunneler 서버 주소 (도메인 또는 IP)
+
+Template: tunneler-client/use_ssl
+Type: boolean
+Default: false
+Description: SSL(HTTPS/WSS)을 사용합니까?
+
+Template: tunneler-client/subdomain
+Type: string
+Description: 사용할 서브도메인 (예: mybox)
+
+Template: tunneler-client/token
+Type: string
+Description: 인증 토큰 (없으면 비워두세요)
+
+Template: tunneler-client/http_base
+Type: string
+Description: 로컬 HTTP 베이스 (예: http://127.0.0.1:8000, 없으면 비워두세요)
+
+Template: tunneler-client/tcp_maps
+Type: string
+Description: TCP 매핑 (예: ssh=127.0.0.1:22,db=127.0.0.1:5432)
+
+Template: tunneler-client/udp_maps
+Type: string
+Description: UDP 매핑 (예: dns=127.0.0.1:53)

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+case "$1" in
+  configure|triggered)
+    db_get tunneler-client/server_url; SERVER_URL="$RET"
+    db_get tunneler-client/use_ssl;    USE_SSL="$RET"
+    db_get tunneler-client/subdomain;  SUBDOMAIN="$RET"
+    db_get tunneler-client/token;      TOKEN="$RET"
+    db_get tunneler-client/http_base;  HTTP_BASE="$RET"
+    db_get tunneler-client/tcp_maps;   TCP_MAPS="$RET"
+    db_get tunneler-client/udp_maps;   UDP_MAPS="$RET"
+
+    chmod 0755 /opt/tunneler-client/setup_full_client.sh || true
+    chmod 0755 /usr/bin/tunneler-map || true
+
+    /opt/tunneler-client/setup_full_client.sh \
+      --server "$SERVER_URL" --ssl "$USE_SSL" --subdomain "$SUBDOMAIN" \
+      --token "$TOKEN" --http "$HTTP_BASE" --tcp "$TCP_MAPS" --udp "$UDP_MAPS"
+    ;;
+esac
+exit 0

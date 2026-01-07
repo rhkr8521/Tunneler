@@ -1,0 +1,4 @@
+WS_URL=ws://example.com/_ws
+SUBDOMAIN=mybox
+TOKEN=
+EXTRA_ARGS=
