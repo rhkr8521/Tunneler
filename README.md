@@ -86,14 +86,30 @@
     -   Ubuntu/Debian, macOS, Windows 10+
     -   Python 3.10+ (OS별 설치 스크립트가 가상환경을 자동으로 구성)
 
-### 1. 서버 설치 (Ubuntu)
+### 1. 서버 설치 (Ubuntu/Debian)
 
-1.  서버에 `server.py`, `requirements.txt`, `install_server.sh` 파일을 업로드합니다.
-2.  아래 명령어를 실행하고 프롬프트에 따라 설정을 입력합니다.
+1.  **Tunneler 전용 APT 저장소를 통해 패키지 관리 및 자동 업데이트를 지원합니다.**
+2.  **저장소를 신뢰하기 위해 인증 키를 등록하고 리스트를 추가합니다. (한번만 수행)**
 
     ```bash
-    sudo bash install_server.sh
+    # GPG 공용키 등록
+    curl -fsSL [https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key](https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key) \
+      | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
+    
+    # APT 저장소 리스트 추가
+    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] [https://rhkr8521.github.io/Tunneler/repo](https://rhkr8521.github.io/Tunneler/repo) stable main" \
+      | sudo tee /etc/apt/sources.list.d/tunneler.list
+
+    # APT 업데이트
+    sudo apt update
     ```
+
+3.  **서버 패키지 설치**
+
+    ```bash
+    sudo apt install tunneler-server
+    ```
+
     -   **주요 입력 항목**: 도메인, 와일드카드 사용 여부, TCP/UDP 포트 범위, 토큰 화이트리스트, 대시보드 ID/비밀번호, Let's Encrypt 사용 여부
 
 3.  **설치 확인**
@@ -104,12 +120,27 @@
 
 ### 2. 클라이언트 설치
 
-#### Ubuntu
+#### Ubuntu/Debian
 
-1.  `client.py`, `requirements.txt`, `install_client_ubuntu.sh` 파일을 준비합니다.
-2.  스크립트를 실행하고 프롬프트에 따라 설정을 입력합니다.
+1.  **Tunneler 전용 APT 저장소를 통해 패키지 관리 및 자동 업데이트를 지원합니다.**
+2.  **저장소를 신뢰하기 위해 인증 키를 등록하고 리스트를 추가합니다. (한번만 수행)**
+
     ```bash
-    bash install_client_ubuntu.sh
+    # GPG 공용키 등록
+    curl -fsSL [https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key](https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key) \
+      | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
+    
+    # APT 저장소 리스트 추가
+    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] [https://rhkr8521.github.io/Tunneler/repo](https://rhkr8521.github.io/Tunneler/repo) stable main" \
+      | sudo tee /etc/apt/sources.list.d/tunneler.list
+
+    # APT 업데이트
+    sudo apt update
+    ```
+
+3.  **클라이언트 패키지 설치**
+    ```bash
+    sudo apt install tunneler-client
     ```
 3.  **상태 확인**: `systemctl --user status tunneler-client -l`
 
@@ -149,10 +180,43 @@
 -   **구분**: 여러 개를 등록할 경우 쉼표(`,`)로 구분합니다.
 -   **예시**: `ssh=127.0.0.1:22,db=127.0.0.1:5432,game=192.168.0.5:25565`
 
+## ⚙️ 서버 설정 변경 및 재설정 (Reconfigure)
+
+- **설치 시 입력한 서버 정보, 서브도메인, 토큰 등을 다시 수정하고 싶을 때 사용합니다.**
+
+    ```bash
+    # 서버 설정 재구성
+    sudo dpkg-reconfigure tunneler-server
+    ```
+
+## ⚙️ 클라이언트 설정 변경 및 재설정 (Reconfigure)
+
+- **설치 시 입력한 서버 정보, 서브도메인, 토큰 등을 다시 수정하고 싶을 때 사용합니다.**
+
+    ```bash
+    # 클라이언트 설정 재구성
+    sudo rm /etc/default/tunneler-client
+    
+    sudo dpkg-reconfigure tunneler-client
+    ```
+
+## 🗺️ 클라이언트 포트 매핑 관리 도구 (tunneler-map)
+
+- **설정 파일을 직접 열지 않고도 실시간으로 TCP/UDP/HTTP 매핑을 관리합니다.**
+
+    ```bash
+    sudo tunneler-map
+    ```
+    
+예시 입력:
+- **TCP 추가**: ssh=127.0.0.1:22
+- **UDP 추가**: dns=127.0.0.1:53
+- **HTTP 수정**: http://127.0.0.1:8080 (또는 del로 삭제)
+
 ## 🗑️ 제거 방법
 
--   **Ubuntu Server**: `sudo bash uninstall_server.sh` 스크립트를 실행합니다.
--   **Ubuntu Client**: `bash uninstall_client_ubuntu.sh` 스크립트를 실행합니다.
+-   **Ubuntu/Debian Server**: `sudo apt purge tunneler-server` 명령어를 실행합니다.
+-   **Ubuntu/Debian Client**: `sudo apt purge tunneler-client` 명령어를 실행합니다.
 -   **macOS Client**: `bash uninstall_client_mac.sh` 스크립트를 실행합니다.
 -   **Windows Client**: `uninstall_client_windows.ps1` 스크립트를 **관리자 권한으로 실행** 합니다.
 
