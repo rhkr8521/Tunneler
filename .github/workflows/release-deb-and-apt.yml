@@ -72,4 +72,3 @@ jobs:
           git add -A
           git commit -m "APT: publish ${{ steps.ver.outputs.version }}" || exit 0
           git push
-
