@@ -29,11 +29,9 @@ jobs:
           sudo apt-get install -y dpkg-dev apt-utils gnupg
 
       - name: Build deb
-        working-directory: packaging/server/rootfs
         run: |
-          chmod +x scripts/build_deb.sh
-          ./scripts/build_deb.sh "${{ steps.ver.outputs.version }}"
-          ls -al dist
+          chmod +x packaging/server/rootfs/scripts/build_deb.sh
+          VERSION="${GITHUB_REF_NAME#v}" packaging/server/rootfs/scripts/build_deb.sh
 
       - name: Create GitHub Release and upload deb
         uses: softprops/action-gh-release@v2
