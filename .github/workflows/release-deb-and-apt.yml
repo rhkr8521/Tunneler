@@ -37,67 +37,82 @@ jobs:
   publish-apt:
     runs-on: ubuntu-24.04
     needs: build
+    permissions:
+      contents: write   # gh-pages push 필요
     steps:
-      # gh-pages 브랜치 체크아웃 (repo 폴더를 여기 커밋할 거임)
-      - uses: actions/checkout@v4
+      # 1) main 체크아웃: 스크립트/packaging 접근용
+      - name: Checkout main
+        uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-          ref: ${{ github.ref }}
-
-      # build job 산출물 가져오기
+  
+      # 2) build job 산출물(dist/*.deb) 다운로드
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
           name: dist-debs
           path: dist
-
+  
+      # 3) APT repo 생성 도구 설치
       - name: Install repo tools
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev apt-utils gnupg
-
+  
+      # 4) GPG 키 import (Secrets 사용)
       - name: Import GPG key
-        run: |
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "$APT_GPG_OWNERTRUST" | gpg --batch --import-ownertrust
-          gpg --list-secret-keys --keyid-format LONG
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
           APT_GPG_OWNERTRUST: ${{ secrets.APT_GPG_OWNERTRUST }}
-
-      # gh-pages 브랜치에는 scripts가 없을 수 있으니,
-      # main에서 scripts/apt_repo_publish.sh를 가져오는 대신,
-      # 여기서는 워크플로우에서 직접 생성하지 않고
-      # "gh-pages에도 scripts를 두거나" / "publish 스크립트를 inline으로 넣어야" 함.
-      #
-      # 가장 단순한 방법: gh-pages에도 scripts/apt_repo_publish.sh를 포함시키기.
-      # (gh-pages는 repo/만 있어야 한다는 강박 버리고, scripts는 있어도 됨)
-      #
-      # 만약 정말 gh-pages에 scripts를 안 두고 싶으면,
-      # publish job에서 main을 추가 checkout해서 스크립트만 복사해 쓰면 됨.
-
-      - name: Checkout main to get scripts
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main
-
+        run: |
+          # 비어있으면 바로 실패하게
+          test -n "$APT_GPG_PRIVATE_KEY"
+          test -n "$APT_GPG_OWNERTRUST"
+  
+          # (중요) echo는 줄바꿈 보존 위해 printf 사용 권장
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          printf '%s\n' "$APT_GPG_OWNERTRUST"   | gpg --batch --import-ownertrust
+          gpg --list-secret-keys --keyid-format LONG
+  
+      # 5) gh-pages 브랜치를 worktree로 붙임 (이 디렉터리에서 커밋/푸시)
+      - name: Prepare gh-pages worktree
+        run: |
+          git fetch origin gh-pages:gh-pages
+          git worktree add gh-pages-wt gh-pages
+  
+      # 6) repo 생성 (gh-pages-wt/repo에 생성)
       - name: Publish APT repo into gh-pages ./repo
         run: |
           chmod +x packaging/server/rootfs/scripts/apt_repo_publish.sh
           ls -al dist
-          # dist 안에 여러 deb가 있으니 전부 publish 스크립트를 돌린다
-          # (스크립트가 1개 deb만 받게 되어있어서 루프)
+  
+          # gh-pages 쪽 repo 폴더는 매번 새로(원하는 동작이면)
+          rm -rf gh-pages-wt/repo
+          mkdir -p gh-pages-wt/repo
+  
           for deb in dist/*.deb; do
             echo "[PUBLISH] $deb"
-            packaging/server/rootfs/scripts/apt_repo_publish.sh "$deb" repo
+            packaging/server/rootfs/scripts/apt_repo_publish.sh "$deb" gh-pages-wt/repo
           done
-
+  
+          # index.html도 항상 유지하고 싶으면(gh-pages 루트)
+          if [ ! -f gh-pages-wt/index.html ]; then
+            echo "# Tunneler APT Repo" > gh-pages-wt/index.html
+          fi
+  
+      # 7) gh-pages에 커밋/푸시
       - name: Commit & push gh-pages
+        working-directory: gh-pages-wt
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add repo
+  
+          git add repo index.html
+          git status
+  
+          # 변경 없으면 종료
           git commit -m "apt: publish ${GITHUB_REF_NAME}" || exit 0
-          git push
+          git push origin gh-pages
+  
 
