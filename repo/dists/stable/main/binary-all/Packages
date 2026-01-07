@@ -1,0 +1,16 @@
+Package: tunneler-server
+Version: 1.2.1
+Architecture: all
+Maintainer: rhkr8521 <rhkr8521@rhkr8521.com>
+Depends: bash, nginx, ufw, curl, jq, python3, python3-venv, python3-pip, ca-certificates, systemd, debconf
+Recommends: certbot, python3-certbot-nginx
+Filename: pool/main/t/tunneler-server/tunneler-server_1.2.1_all.deb
+Size: 27478
+MD5sum: 913d1b39d3c61bea6ea64b96a143d92a
+SHA1: a42a93af548d4d57d0caea8acbe414aa11e35e04
+SHA256: 8e25686f4747eb183e02f0f67e6c5e083bc386fa5dffc36b28f21ffd46f8e870
+Section: net
+Priority: optional
+Description: Tunneler Server with auto nginx/ufw/ssl setup
+ Installs Tunneler server and configures nginx/ufw and optional Let's Encrypt SSL.
+
