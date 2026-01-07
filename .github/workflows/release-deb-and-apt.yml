@@ -1,0 +1,75 @@
+name: Build .deb and publish APT (GitHub Pages)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils apt-ftparchive gnupg
+
+      - name: Build deb
+        run: |
+          chmod +x scripts/build_deb.sh
+          ./scripts/build_deb.sh "${{ steps.ver.outputs.version }}"
+          ls -al dist
+
+      - name: Create GitHub Release and upload deb
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+
+      # ---- gh-pages로 APT repo 업데이트 ----
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: repo
+
+      - name: Import GPG key for APT signing
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
+            echo "[ERROR] Missing secret: APT_GPG_PRIVATE_KEY"
+            exit 1
+          fi
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+      - name: Update APT repo metadata + sign
+        run: |
+          chmod +x scripts/apt_repo_publish.sh
+          DEB="$(ls dist/*.deb | head -n1)"
+          ./scripts/apt_repo_publish.sh "$DEB" repo
+
+      - name: Commit & Push gh-pages
+        run: |
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "APT: publish ${{ steps.ver.outputs.version }}" || exit 0
+          git push
+
