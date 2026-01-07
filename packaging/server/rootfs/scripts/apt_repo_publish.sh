@@ -4,7 +4,7 @@ set -euo pipefail
 # 사용:
 #   ./scripts/apt_repo_publish.sh <deb_path> <repo_dir>
 # 예:
-#   ./scripts/apt_repo_publish.sh dist/tunneler-server_1.1.2_all.deb repo
+#   ./scripts/apt_repo_publish.sh dist/tunneler-server_1.2.1_amd64.deb repo
 
 DEB_PATH="${1:-}"
 REPO_DIR="${2:-}"
@@ -24,22 +24,30 @@ CODENAME="stable"
 COMPONENT="main"
 ARCHES="amd64 arm64 all"
 
-mkdir -p "$REPO_DIR/pool/$COMPONENT"
-mkdir -p "$REPO_DIR/dists/$CODENAME/$COMPONENT"
+# repo 루트 생성
+mkdir -p "$REPO_DIR"
 
-# deb를 pool로 복사 (패키지명 기반 하위 폴더로 깔끔하게)
+# pool 디렉터리
+mkdir -p "$REPO_DIR/pool/$COMPONENT"
+
+# deb를 pool로 복사 (패키지명 기반 하위 폴더로 정리)
 PKG="$(dpkg-deb -f "$DEB_PATH" Package)"
 PKGDIR="$REPO_DIR/pool/$COMPONENT/${PKG:0:1}/$PKG"
 mkdir -p "$PKGDIR"
 cp -f "$DEB_PATH" "$PKGDIR/"
 
 # Packages 생성
+# ✅ 중요: (cd "$REPO_DIR") 안에서 경로는 repo/로 시작하면 repo/repo가 된다.
+# 그래서 BD는 repo 내부 상대경로로 만든다.
 for A in $ARCHES; do
-  BD="$REPO_DIR/dists/$CODENAME/$COMPONENT/binary-$A"
-  mkdir -p "$BD"
+  BD="dists/$CODENAME/$COMPONENT/binary-$A"
+  mkdir -p "$REPO_DIR/$BD"
 
-  (cd "$REPO_DIR" && dpkg-scanpackages -a "$A" "pool/$COMPONENT" /dev/null > "$BD/Packages") || true
-  gzip -kf "$BD/Packages"
+  (
+    cd "$REPO_DIR"
+    dpkg-scanpackages -a "$A" "pool/$COMPONENT" /dev/null > "$BD/Packages" || true
+    gzip -kf "$BD/Packages"
+  )
 done
 
 # Release 생성(apt-ftparchive 사용)
