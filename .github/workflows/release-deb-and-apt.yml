@@ -31,7 +31,8 @@ jobs:
       - name: Build deb
         run: |
           chmod +x packaging/server/rootfs/scripts/build_deb.sh
-          VERSION="${GITHUB_REF_NAME#v}" packaging/server/rootfs/scripts/build_deb.sh
+          VER="${GITHUB_REF_NAME#v}"
+          packaging/server/rootfs/scripts/build_deb.sh "$VER"
 
       - name: Create GitHub Release and upload deb
         uses: softprops/action-gh-release@v2
