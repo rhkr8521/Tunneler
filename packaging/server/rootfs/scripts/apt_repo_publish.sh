@@ -15,13 +15,13 @@ if [[ ! -f "$DEB_PATH" ]]; then
   exit 1
 fi
 
-# APT repo 기본값
 CODENAME="stable"
 COMPONENT="main"
-ARCHES=("amd64" "arm64" "all")
+
+# ✅ A 방식: all만 인덱싱
+ARCHES=("all")
 
 mkdir -p "$REPO_DIR/pool/$COMPONENT"
-mkdir -p "$REPO_DIR/dists/$CODENAME/$COMPONENT"
 
 # deb를 pool로 복사
 PKG="$(dpkg-deb -f "$DEB_PATH" Package)"
@@ -35,8 +35,6 @@ echo "[INFO] deb fields: $(dpkg-deb -f "$DEB_PATH" Package Version Architecture 
 # Packages 생성
 for A in "${ARCHES[@]}"; do
   BD="$REPO_DIR/dists/$CODENAME/$COMPONENT/binary-$A"
-
-  # ✅ 제일 중요: 리다이렉트 전에 디렉토리부터 만든다
   mkdir -p "$BD"
 
   echo "[INFO] generating Packages for arch=$A ..."
@@ -46,28 +44,19 @@ for A in "${ARCHES[@]}"; do
   )
 
   if [[ ! -s "$BD/Packages" ]]; then
-    echo "[WARN] Packages is empty: $BD/Packages (arch=$A)"
+    echo "[ERROR] Packages is empty: $BD/Packages (arch=$A)"
+    exit 1
   fi
 
   gzip -kf "$BD/Packages"
 done
 
-# Release 생성(apt-ftparchive 사용)
+# Release 생성(apt-ftparchive)
 cat > "$REPO_DIR/apt-ftparchive.conf" <<EOF
 Dir { ArchiveDir "."; };
 Default { Packages::Compress ". gzip"; };
 TreeDefault { BinCacheDB "packages-\$(ARCH).db"; };
 
-BinDirectory "dists/$CODENAME/$COMPONENT/binary-amd64" {
-  Packages "dists/$CODENAME/$COMPONENT/binary-amd64/Packages";
-  Contents "dists/$CODENAME/$COMPONENT/Contents-amd64";
-  Arch "amd64";
-};
-BinDirectory "dists/$CODENAME/$COMPONENT/binary-arm64" {
-  Packages "dists/$CODENAME/$COMPONENT/binary-arm64/Packages";
-  Contents "dists/$CODENAME/$COMPONENT/Contents-arm64";
-  Arch "arm64";
-};
 BinDirectory "dists/$CODENAME/$COMPONENT/binary-all" {
   Packages "dists/$CODENAME/$COMPONENT/binary-all/Packages";
   Contents "dists/$CODENAME/$COMPONENT/Contents-all";
@@ -83,12 +72,12 @@ apt-ftparchive \
   -o APT::FTPArchive::Release::Label="Tunneler" \
   -o APT::FTPArchive::Release::Suite="$CODENAME" \
   -o APT::FTPArchive::Release::Codename="$CODENAME" \
-  -o APT::FTPArchive::Release::Architectures="amd64 arm64 all" \
+  -o APT::FTPArchive::Release::Architectures="all" \
   -o APT::FTPArchive::Release::Components="$COMPONENT" \
   -o APT::FTPArchive::Release::Description="Tunneler APT Repository" \
   release "dists/$CODENAME" > "dists/$CODENAME/Release"
 
-# 서명(액션에서 key import 되어 있어야 함)
+# 서명
 gpg --batch --yes --armor -abs -o "dists/$CODENAME/Release.gpg" "dists/$CODENAME/Release"
 gpg --batch --yes --clearsign -o "dists/$CODENAME/InRelease" "dists/$CODENAME/Release"
 popd >/dev/null
