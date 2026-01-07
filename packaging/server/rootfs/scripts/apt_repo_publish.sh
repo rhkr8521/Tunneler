@@ -37,6 +37,7 @@ cp -f "$DEB_PATH" "$PKGDIR/"
 for A in $ARCHES; do
   BD="$REPO_DIR/dists/$CODENAME/$COMPONENT/binary-$A"
   mkdir -p "$BD"
+
   (cd "$REPO_DIR" && dpkg-scanpackages -a "$A" "pool/$COMPONENT" /dev/null > "$BD/Packages") || true
   gzip -kf "$BD/Packages"
 done
