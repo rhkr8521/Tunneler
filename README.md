@@ -93,12 +93,10 @@
 
     ```bash
     # GPG 공용키 등록
-    curl -fsSL [https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key](https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key) \
-      | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
+    curl -fsSL https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
     
     # APT 저장소 리스트 추가
-    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] [https://rhkr8521.github.io/Tunneler/repo](https://rhkr8521.github.io/Tunneler/repo) stable main" \
-      | sudo tee /etc/apt/sources.list.d/tunneler.list
+    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] https://rhkr8521.github.io/Tunneler/repo stable main" | sudo tee /etc/apt/sources.list.d/tunneler.list
 
     # APT 업데이트
     sudo apt update
@@ -127,12 +125,10 @@
 
     ```bash
     # GPG 공용키 등록
-    curl -fsSL [https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key](https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key) \
-      | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
+    curl -fsSL https://rhkr8521.github.io/Tunneler/tunneler-apt-public.key | sudo gpg --dearmor -o /usr/share/keyrings/tunneler-archive-keyring.gpg
     
     # APT 저장소 리스트 추가
-    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] [https://rhkr8521.github.io/Tunneler/repo](https://rhkr8521.github.io/Tunneler/repo) stable main" \
-      | sudo tee /etc/apt/sources.list.d/tunneler.list
+    echo "deb [signed-by=/usr/share/keyrings/tunneler-archive-keyring.gpg] https://rhkr8521.github.io/Tunneler/repo stable main" | sudo tee /etc/apt/sources.list.d/tunneler.list
 
     # APT 업데이트
     sudo apt update
