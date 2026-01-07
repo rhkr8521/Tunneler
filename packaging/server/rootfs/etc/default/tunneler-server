@@ -1,0 +1,13 @@
+sudo mkdir -p /tmp/tunneler-server-pkg/etc/default
+cat | sudo tee /tmp/tunneler-server-pkg/etc/default/tunneler-server >/dev/null <<'EOF'
+BIND=0.0.0.0
+PORT=8080
+TCP_PORT_RANGE=20000-20100
+UDP_PORT_RANGE=21000-21100
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin
+TOK_FILE=/opt/tunneler/tokens.txt
+ADMIN_STATE_FILE=/opt/tunneler/admin_state.json
+LOG_LEVEL=INFO
+EOF
+sudo chmod 600 /tmp/tunneler-server-pkg/etc/default/tunneler-server

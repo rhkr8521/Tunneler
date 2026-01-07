@@ -1,0 +1,47 @@
+#!/bin/sh
+set -e
+
+. /usr/share/debconf/confmodule
+
+case "$1" in
+  configure|triggered)
+    db_get tunneler/domain;    DOMAIN="$RET"
+    db_get tunneler/wildcard;  WILD="$RET"
+    db_get tunneler/app_port;  APP_PORT="$RET"
+    db_get tunneler/tcp_range; TCP_RANGE="$RET"
+    db_get tunneler/udp_range; UDP_RANGE="$RET"
+    db_get tunneler/tokens;    TOKENS="$RET"
+    db_get tunneler/admin_id;  ADMIN_ID="$RET"
+    db_get tunneler/admin_pw;  ADMIN_PW="$RET"
+    db_get tunneler/use_le;    USE_LE="$RET"
+
+    WCSUB="N"
+    if [ "$WILD" = "true" ]; then WCSUB="Y"; fi
+
+    LE="N"
+    LE_EMAIL=""
+    if [ "$USE_LE" = "true" ]; then
+      LE="Y"
+      db_get tunneler/le_email; LE_EMAIL="$RET"
+      # 안전장치: use_le=true인데 이메일이 비었으면 setup_full에서 에러 처리됨
+    fi
+
+    # 실행 스크립트 권한
+    chmod 0755 /opt/tunneler/setup_full.sh || true
+
+    # setup_full은 '질문' 절대 하지 말고 인자만 받아 동작해야 함
+    /opt/tunneler/setup_full.sh \
+      --domain "$DOMAIN" \
+      --wildcard "$WCSUB" \
+      --app-port "$APP_PORT" \
+      --tcp-range "$TCP_RANGE" \
+      --udp-range "$UDP_RANGE" \
+      --tokens "$TOKENS" \
+      --admin-id "$ADMIN_ID" \
+      --admin-pw "$ADMIN_PW" \
+      --use-le "$LE" \
+      --le-email "$LE_EMAIL"
+    ;;
+esac
+
+exit 0
