@@ -39,7 +39,8 @@ jobs:
       # gh-pages 브랜치 체크아웃 (repo 폴더를 여기 커밋할 거임)
       - uses: actions/checkout@v4
         with:
-          ref: gh-pages
+          fetch-depth: 0
+          ref: ${{ github.ref }}
 
       # build job 산출물 가져오기
       - name: Download dist artifact
