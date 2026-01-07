@@ -9,17 +9,29 @@ permissions:
   contents: write
 
 jobs:
+  # 1. 빌드 Job: 서버와 클라이언트 .deb 패키지를 생성
   build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build .deb (amd64 + arm64)
+      - name: Build All .deb Packages
         run: |
-          chmod +x packaging/server/rootfs/scripts/build_deb.sh
+          # 태그에서 버전 추출 (v1.2.3 -> 1.2.3)
           VER="${GITHUB_REF_NAME#v}"
-          packaging/server/rootfs/scripts/build_deb.sh "$VER" amd64
-          packaging/server/rootfs/scripts/build_deb.sh "$VER" arm64
+          mkdir -p dist
+
+          # 실행 권한 부여
+          chmod +x packaging/server/rootfs/scripts/build_deb.sh
+          chmod +x packaging/client/rootfs/scripts/build_deb.sh
+
+          # 1) 서버 패키지 빌드
+          echo "[BUILD] Building Tunneler Server v$VER..."
+          packaging/server/rootfs/scripts/build_deb.sh "$VER"
+
+          # 2) 클라이언트 패키지 빌드
+          echo "[BUILD] Building Tunneler Client v$VER..."
+          packaging/client/rootfs/scripts/build_deb.sh "$VER"
 
           ls -al dist
 
@@ -34,85 +46,68 @@ jobs:
         with:
           files: dist/*.deb
 
+  # 2. 배포 Job: 빌드된 패키지들을 APT 레포지토리(gh-pages)에 등록
   publish-apt:
     runs-on: ubuntu-24.04
     needs: build
-    permissions:
-      contents: write   # gh-pages push 필요
     steps:
-      # 1) main 체크아웃: 스크립트/packaging 접근용
+      # 1) main 체크아웃: 배포 스크립트 실행용
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
-  
-      # 2) build job 산출물(dist/*.deb) 다운로드
+
+      # 2) 빌드된 .deb 파일들 다운로드
       - name: Download dist artifact
         uses: actions/download-artifact@v4
         with:
           name: dist-debs
           path: dist
-  
-      # 3) APT repo 생성 도구 설치
+
+      # 3) APT 관리 도구 설치
       - name: Install repo tools
         run: |
           sudo apt-get update
           sudo apt-get install -y dpkg-dev apt-utils gnupg
-  
-      # 4) GPG 키 import (Secrets 사용)
+
+      # 4) GPG 키 import (Secrets에 설정된 값 사용)
       - name: Import GPG key
         env:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_OWNERTRUST: ${{ secrets.APT_GPG_OWNERTRUST }}
         run: |
-          # 비어있으면 바로 실패하게
           test -n "$APT_GPG_PRIVATE_KEY"
-          test -n "$APT_GPG_OWNERTRUST"
-  
-          # (중요) echo는 줄바꿈 보존 위해 printf 사용 권장
           printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          printf '%s\n' "$APT_GPG_OWNERTRUST"   | gpg --batch --import-ownertrust
           gpg --list-secret-keys --keyid-format LONG
-  
-      # 5) gh-pages 브랜치를 worktree로 붙임 (이 디렉터리에서 커밋/푸시)
+
+      # 5) gh-pages 브랜치 준비 (작업 트리에 연결)
       - name: Prepare gh-pages worktree
         run: |
           git fetch origin gh-pages:gh-pages
           git worktree add gh-pages-wt gh-pages
-  
-      # 6) repo 생성 (gh-pages-wt/repo에 생성)
-      - name: Publish APT repo into gh-pages ./repo
+
+      # 6) APT 레포지토리 업데이트 스크립트 실행
+      # 이 스크립트가 dist/*.deb를 스캔하여 amd64, arm64, all 인덱스를 모두 생성합니다.
+      - name: Publish All debs into APT repo
         run: |
           chmod +x packaging/server/rootfs/scripts/apt_repo_publish.sh
-          ls -al dist
-  
-          # gh-pages 쪽 repo 폴더는 매번 새로(원하는 동작이면)
-          rm -rf gh-pages-wt/repo
-          mkdir -p gh-pages-wt/repo
-  
-          for deb in dist/*.deb; do
-            echo "[PUBLISH] $deb"
-            packaging/server/rootfs/scripts/apt_repo_publish.sh "$deb" gh-pages-wt/repo
-          done
-  
-          # index.html도 항상 유지하고 싶으면(gh-pages 루트)
+          
+          # dist 폴더 내의 모든 패키지를 gh-pages-wt/repo 경로로 배포
+          # 배포 스크립트 내부에서 dpkg-scanpackages와 apt-ftparchive가 돌아갑니다.
+          packaging/server/rootfs/scripts/apt_repo_publish.sh dist gh-pages-wt/repo
+
+          # index.html 유지 (웹 접속 확인용)
           if [ ! -f gh-pages-wt/index.html ]; then
-            echo "# Tunneler APT Repo" > gh-pages-wt/index.html
+            echo "# Tunneler APT Repository" > gh-pages-wt/index.html
           fi
-  
-      # 7) gh-pages에 커밋/푸시
+
+      # 7) 변경사항을 gh-pages 브랜치에 푸시
       - name: Commit & push gh-pages
         working-directory: gh-pages-wt
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-  
+          
           git add repo index.html
-          git status
-  
-          # 변경 없으면 종료
-          git commit -m "apt: publish ${GITHUB_REF_NAME}" || exit 0
+          # 변경 사항이 있을 때만 커밋
+          git commit -m "apt: publish v${GITHUB_REF_NAME}" || exit 0
           git push origin gh-pages
-  
-
