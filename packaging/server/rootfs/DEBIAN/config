@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+if [ -f /etc/default/tunneler-server ]; then
+  exit 0
+fi
+
+# 최초 설치 1회 질문
+db_input high   tunneler/domain    || true
+db_input high   tunneler/wildcard  || true
+db_input high   tunneler/app_port  || true
+db_input high   tunneler/tcp_range || true
+db_input high   tunneler/udp_range || true
+db_input high   tunneler/tokens    || true
+db_input high   tunneler/admin_id  || true
+db_input high   tunneler/admin_pw  || true
+db_input high   tunneler/use_le    || true
+db_go || true
+
+db_get tunneler/use_le
+USE_LE="$RET"
+
+# HTTPS 선택(true)일 때만 이메일 질문(빈값 방지)
+if [ "$USE_LE" = "true" ]; then
+  while :; do
+    db_input high tunneler/le_email || true
+    db_go || true
+    db_get tunneler/le_email
+    EMAIL="$RET"
+    [ -n "$EMAIL" ] && break
+    db_fset tunneler/le_email seen false || true
+  done
+fi
+
+exit 0
