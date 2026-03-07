@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION_FILE="/opt/tunneler-client/VERSION"
+
+if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
+  VERSION="$(cat "${VERSION_FILE}" 2>/dev/null || echo dev)"
+  printf 'tunneler-client %s\n' "${VERSION}"
+  exit 0
+fi
+
+exec /opt/tunneler-client/start.sh "$@"

@@ -32,6 +32,7 @@ PKGDIR="${WORKDIR}/${PKGNAME}-pkg"
 mkdir -p "${PKGDIR}"
 
 cp -a "${ROOTFS}/." "${PKGDIR}/"
+printf '%s\n' "${VERSION}" > "${PKGDIR}/opt/tunneler/VERSION"
 
 CONTROL="${PKGDIR}/DEBIAN/control"
 if [[ ! -f "${CONTROL}" ]]; then
@@ -68,6 +69,7 @@ chmod 0755 "${PKGDIR}/DEBIAN" || true
 for f in postinst prerm preinst postrm config; do
   [[ -f "${PKGDIR}/DEBIAN/${f}" ]] && chmod 0755 "${PKGDIR}/DEBIAN/${f}" || true
 done
+chmod 0755 "${PKGDIR}/usr/bin/tunneler-server" || true
 
 # conffiles 검증
 if [[ -f "${PKGDIR}/DEBIAN/conffiles" ]]; then
@@ -85,4 +87,3 @@ OUTFILE="${OUTDIR}/${PKGNAME}_${VERSION}_${ARCH}.deb"
 dpkg-deb --build "${PKGDIR}" "${OUTFILE}"
 
 echo "[OK] built: ${OUTFILE}"
-

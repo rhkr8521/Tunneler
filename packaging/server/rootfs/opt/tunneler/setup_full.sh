@@ -183,7 +183,9 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
     proxy_read_timeout 3600s;
   }
 
@@ -192,13 +194,32 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
   }
 
-  location /dashboard { proxy_pass http://tunnel_app/dashboard; }
-  location /api/      { proxy_pass http://tunnel_app/api/; }
+  location /dashboard {
+    proxy_pass http://tunnel_app/dashboard;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
+  }
+  location /api/ {
+    proxy_pass http://tunnel_app/api/;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
+  }
 
   location / {
     proxy_pass http://tunnel_app;
@@ -206,7 +227,9 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
     proxy_read_timeout 3600s;
     client_max_body_size 64m;
   }

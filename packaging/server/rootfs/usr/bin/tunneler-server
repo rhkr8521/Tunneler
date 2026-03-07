@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION_FILE="/opt/tunneler/VERSION"
+ENV_FILE="/etc/default/tunneler-server"
+
+if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
+  VERSION="$(cat "${VERSION_FILE}" 2>/dev/null || echo dev)"
+  printf 'tunneler-server %s\n' "${VERSION}"
+  exit 0
+fi
+
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
+
+exec /opt/tunneler/.venv/bin/python /opt/tunneler/server.py "$@"

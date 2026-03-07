@@ -23,6 +23,9 @@ mkdir -p "${PKGDIR}"
 # 2. 파일 복사
 cp -a "${ROOTFS}/." "${PKGDIR}/"
 
+# 2-1. 설치 버전 파일 주입
+printf '%s\n' "${VERSION}" > "${PKGDIR}/opt/tunneler-client/VERSION"
+
 # 3. Control 파일 수정 (버전 업데이트 및 개행 문자 강제 추가)
 CONTROL="${PKGDIR}/DEBIAN/control"
 sed -i "s/^Version: .*/Version: ${VERSION}/" "${CONTROL}"
@@ -31,6 +34,7 @@ printf "\n" >> "${CONTROL}"
 # 4. 권한 설정 (에러 방지 핵심)
 chmod 0755 "${PKGDIR}/DEBIAN/postinst" "${PKGDIR}/DEBIAN/config" "${PKGDIR}/DEBIAN/prerm" || true
 chmod 0755 "${PKGDIR}/usr/bin/tunneler-map" || true
+chmod 0755 "${PKGDIR}/usr/bin/tunneler-client" || true
 chmod 0755 "${PKGDIR}/opt/tunneler-client/setup_full_client.sh" || true
 
 # 5. 빌드

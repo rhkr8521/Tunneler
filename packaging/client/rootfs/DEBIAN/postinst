@@ -14,6 +14,7 @@ case "$1" in
 
     chmod 0755 /opt/tunneler-client/setup_full_client.sh || true
     chmod 0755 /usr/bin/tunneler-map || true
+    chmod 0755 /usr/bin/tunneler-client || true
 
     /opt/tunneler-client/setup_full_client.sh \
       --server "$SERVER_URL" --ssl "$USE_SSL" --subdomain "$SUBDOMAIN" \

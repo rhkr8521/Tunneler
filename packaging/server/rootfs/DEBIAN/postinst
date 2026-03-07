@@ -28,6 +28,7 @@ case "$1" in
 
     # 실행 스크립트 권한
     chmod 0755 /opt/tunneler/setup_full.sh || true
+    chmod 0755 /usr/bin/tunneler-server || true
 
     # setup_full은 '질문' 절대 하지 말고 인자만 받아 동작해야 함
     /opt/tunneler/setup_full.sh \

@@ -47,6 +47,10 @@ mkdir -p "$INSTALL_DIR"
 cp -f server.py requirements.txt "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
 
+APP_VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)"
+printf '%s\n' "${APP_VERSION:-dev}" > "${INSTALL_DIR}/VERSION"
+chmod 644 "${INSTALL_DIR}/VERSION"
+
 # 로그 디렉터리 생성/권한 (실시간/회전 로그를 위해)
 mkdir -p /var/log/tunneler
 chown root:root /var/log/tunneler
@@ -115,6 +119,30 @@ EOF
 systemctl daemon-reload
 systemctl enable --now tunneler-server
 
+cat > /usr/local/bin/tunneler-server <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION_FILE="/opt/tunneler/VERSION"
+ENV_FILE="/etc/default/tunneler-server"
+
+if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
+  VERSION="$(cat "${VERSION_FILE}" 2>/dev/null || echo dev)"
+  printf 'tunneler-server %s\n' "${VERSION}"
+  exit 0
+fi
+
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
+
+exec /opt/tunneler/.venv/bin/python /opt/tunneler/server.py "$@"
+EOF
+chmod 0755 /usr/local/bin/tunneler-server
+
 # Nginx
 CONF="/etc/nginx/conf.d/tunneler.conf"
 
@@ -144,7 +172,9 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
     proxy_read_timeout 3600s;
   }
 
@@ -153,13 +183,32 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
   }
 
-  location /dashboard { proxy_pass http://tunnel_app/dashboard; }
-  location /api/      { proxy_pass http://tunnel_app/api/; }
+  location /dashboard {
+    proxy_pass http://tunnel_app/dashboard;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
+  }
+  location /api/ {
+    proxy_pass http://tunnel_app/api/;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
+  }
 
   location / {
     proxy_pass http://tunnel_app;
@@ -167,7 +216,9 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header Forwarded "for=\$remote_addr;proto=\$scheme;host=\$host";
     proxy_read_timeout 3600s;
     client_max_body_size 64m;
   }
