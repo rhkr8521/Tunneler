@@ -695,6 +695,59 @@ def broadcast(event: dict):
         with contextlib.suppress(ValueError):
             ADMIN_WSS.remove(ws)
 
+
+def token_meta_items() -> List[Dict[str, Any]]:
+    items = []
+    meta = STATE.get("token_meta", {})
+    keys = sorted(set(ALLOWED_TOKENS) | set(meta.keys()))
+    for tk in keys:
+        m = meta.get(tk, {})
+        items.append({"token": tk, "last_ip": m.get("last_ip"), "last_at": m.get("last_at")})
+    return items
+
+
+def dashboard_snapshot_payload() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "range": f"TCP {TCP_START}-{TCP_END} / UDP {UDP_START}-{UDP_END}",
+        "admin_ip_allow": STATE.get("admin_ip_allow", []),
+        "access_schedules": STATE.get("access_schedules", []),
+        "bot_blocking": normalized_bot_blocking(STATE.get("bot_blocking")),
+        "tokens": sorted(ALLOWED_TOKENS),
+        "token_meta": token_meta_items(),
+        "tunnel_ip_deny": sorted(STATE.get("tunnel_ip_deny", [])),
+        "server_time": datetime.datetime.now().replace(microsecond=0).isoformat(),
+        "tunnels": {
+            k: {
+                "tcp": {n: v["port"] for n, v in TUNNELS[k].get("tcp", {}).items()},
+                "udp": {n: v["port"] for n, v in TUNNELS[k].get("udp", {}).items()},
+                "tcp_items": sorted([
+                    {"name": n, "remote_port": v["port"], "managed": bool(v.get("managed"))}
+                    for n, v in TUNNELS[k].get("tcp", {}).items()
+                ], key=lambda item: item["name"]),
+                "udp_items": sorted([
+                    {"name": n, "remote_port": v["port"], "managed": bool(v.get("managed"))}
+                    for n, v in TUNNELS[k].get("udp", {}).items()
+                ], key=lambda item: item["name"]),
+                "tcp_streams": sum(len(v["streams"]) for v in TUNNELS[k].get("tcp", {}).values()),
+                "udp_flows": sum(len(v["flows"]) for v in TUNNELS[k].get("udp", {}).values()),
+                "current_ips": _current_ips_for(k),
+                "blocked_ips": sorted(((STATE.get("per_tunnel_ip_deny") or {}).get(k, []) or [])),
+                "connected_at": TUNNELS[k].get("connected_at"),
+                "peer_ip": TUNNELS[k].get("peer_ip"),
+                "managed_tcp": sorted([n for n, v in TUNNELS[k].get("tcp", {}).items() if v.get("managed")]),
+                "managed_udp": sorted([n for n, v in TUNNELS[k].get("udp", {}).items() if v.get("managed")]),
+                "suppressed_tcp": suppressed_mapping_bucket(k).get("tcp", []),
+                "suppressed_udp": suppressed_mapping_bucket(k).get("udp", []),
+            }
+            for k in TUNNELS.keys()
+        }
+    }
+
+
+async def send_dashboard_snapshot(ws: web.WebSocketResponse):
+    await ws.send_json({"kind": "dashboard_snapshot", "snapshot": dashboard_snapshot_payload()})
+
 def parse_basic_auth(request: web.Request) -> bool:
     if not ADMIN_USER or not ADMIN_PASS: return False
     auth = request.headers.get("Authorization","")
@@ -929,7 +982,8 @@ async def send_control_and_wait(sub: str, action: str, payload: Optional[Dict[st
     return bool(result.get("ok")), str(result.get("reason") or "")
 
 def broadcast_refresh():
-    broadcast({"kind":"refresh"})
+    if ADMIN_WSS:
+        broadcast({"kind":"dashboard_snapshot", "snapshot": dashboard_snapshot_payload()})
 
 async def attach_tcp_mapping(subdomain: str, ws: web.WebSocketResponse, name: str, requested_port: int=0, managed: bool=False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if name in TUNNELS[subdomain]["tcp"]:
@@ -1156,6 +1210,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     })
                     ring_log(f"ASSIGNED {subdomain} TCP={tcp_assigned} UDP={udp_assigned}")
                     broadcast({"kind":"assigned","subdomain":subdomain,"tcp":tcp_assigned,"udp":udp_assigned})
+                    broadcast_refresh()
 
                 elif mtype == "tcp_data":
                     sid=data["stream_id"]; payload=b64d(data.get("b64"))
@@ -1235,6 +1290,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 TUNNELS.pop(sub, None)
                 ring_log(f"UNREGISTER {sub}")
                 broadcast({"kind":"unregister","subdomain":sub})
+                broadcast_refresh()
                 break
     return ws
 
@@ -1799,13 +1855,21 @@ button,input,select,textarea{font:inherit}
             <p>모든 터널에 공통 적용되는 외부 접근 IP/CIDR 차단 규칙입니다.</p>
           </div>
         </div>
-        <div class="field">
-          <label for="denyIp">차단 규칙</label>
-          <input id="denyIp" placeholder="예: 203.0.113.5, 10.0.0.0/8"/>
+        <div class="form-grid">
+          <div class="field">
+            <label for="denyRuleInput">새 차단 규칙</label>
+            <input id="denyRuleInput" placeholder="예: 203.0.113.5, 10.0.0.0/8"/>
+          </div>
+          <div class="field">
+            <label for="denySearchInput">등록 규칙 검색</label>
+            <input id="denySearchInput" placeholder="IP 또는 CIDR 검색"/>
+          </div>
         </div>
         <div class="panel-actions" style="margin-top:14px">
-          <button id="saveDeny" class="btn btn-danger btn-mini">차단 저장</button>
+          <button id="addDenyBtn" class="btn btn-danger btn-mini">전역 차단 추가</button>
+          <button id="denySearchBtn" class="btn btn-ghost btn-mini">검색</button>
         </div>
+        <div id="globalDenyList" style="margin-top:16px"></div>
       </section>
     </section>
 
@@ -1882,9 +1946,8 @@ button,input,select,textarea{font:inherit}
 let ws;
 let lastSnapshot = null;
 let lastBandwidth = {items:{}, total:{tx:0, rx:0}};
-let snapshotBusy = false;
-let snapshotQueued = false;
-let autoRefreshHandle = null;
+let snapshotWaiters = [];
+let globalDenyState = {page:1, query:''};
 
 /* ===== 토스트/모달 유틸 ===== */
 function showToast(msg, type='info', ms=2200){
@@ -2003,6 +2066,12 @@ function formatLogMeta(meta){
   const modified = meta.modified_at ? meta.modified_at.replace('T',' ') : '';
   return [size, modified].filter(Boolean).join(' · ');
 }
+function currentGlobalDenyRules(){
+  return ((lastSnapshot && lastSnapshot.tunnel_ip_deny) || []).slice();
+}
+function isGlobalBlocked(ip){
+  return currentGlobalDenyRules().includes(ip);
+}
 function syncInputValue(id, value){
   const el = document.getElementById(id);
   if(!el || document.activeElement === el) return;
@@ -2030,13 +2099,33 @@ function shiftMonth(key, diff){
   date.setMonth(date.getMonth() + diff, 1);
   return monthKeyFromDate(date);
 }
-function renderPager(page, pages){
+function pagerPages(page, pages){
+  const nums = [];
+  if(pages <= 7){
+    for(let i=1;i<=pages;i+=1) nums.push(i);
+    return nums;
+  }
+  nums.push(1);
+  const start = Math.max(2, page - 1);
+  const end = Math.min(pages - 1, page + 1);
+  if(start > 2) nums.push('...');
+  for(let i=start;i<=end;i+=1) nums.push(i);
+  if(end < pages - 1) nums.push('...');
+  nums.push(pages);
+  return nums;
+}
+function renderPager(page, pages, group='default'){
   return `
     <div class="pager">
       <div class="pager-info">${page} / ${pages} 페이지</div>
       <div class="pager-controls">
-        <button class="btn btn-ghost btn-mini" data-page-nav="prev">이전</button>
-        <button class="btn btn-ghost btn-mini" data-page-nav="next">다음</button>
+        ${pagerPages(page, pages).map(item=>{
+          if(item === '...'){
+            return `<span class="pill">...</span>`;
+          }
+          const active = item === page;
+          return `<button class="btn ${active ? 'btn-primary' : 'btn-ghost'} btn-mini" data-page-group="${group}" data-page-number="${item}">${item}</button>`;
+        }).join('')}
       </div>
     </div>`;
 }
@@ -2059,6 +2148,20 @@ function renderBandwidthTable(payload = lastBandwidth){
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${escapeHtml(sub)}</td><td>${formatRate(v.rx||0)}</td><td>${formatRate(v.tx||0)}</td>`;
     tbody.appendChild(tr);
+  });
+}
+function resolveSnapshotWaiters(snapshot){
+  const waiters = snapshotWaiters.slice();
+  snapshotWaiters = [];
+  waiters.forEach(entry=>{
+    clearTimeout(entry.timer);
+    entry.resolve(snapshot);
+  });
+}
+function waitForSnapshot(timeout=2500){
+  return new Promise((resolve)=>{
+    const timer = setTimeout(()=> resolve(lastSnapshot), timeout);
+    snapshotWaiters.push({resolve, timer});
   });
 }
 
@@ -2095,97 +2198,149 @@ async function loadLogListAndOpenFirst(){
 }
 
 /* ===== 스냅샷 ===== */
+function renderGlobalDenyList(){
+  const box = document.getElementById('globalDenyList');
+  if(!box) return;
+  syncInputValue('denySearchInput', globalDenyState.query);
+  const rules = currentGlobalDenyRules().slice().sort();
+  const filtered = rules.filter(rule => !globalDenyState.query || rule.toLowerCase().includes(globalDenyState.query.toLowerCase()));
+  const pageSize = 8;
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const page = Math.max(1, Math.min(pages, globalDenyState.page));
+  globalDenyState.page = page;
+  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  box.innerHTML = `
+    <div class="list-stack">
+      ${pageItems.length ? pageItems.map(rule=>`
+        <div class="mapping-row">
+          <div class="mapping-meta">
+            <strong>${escapeHtml(rule)}</strong>
+            <span>모든 터널에 공통 적용되는 전역 차단 규칙</span>
+          </div>
+          <div class="ip-actions">
+            <button class="btn btn-secondary btn-mini remove-global-deny-btn" data-rule="${escapeHtml(rule)}">해제</button>
+          </div>
+        </div>
+      `).join('') : '<div class="empty-state">등록된 전역 차단 규칙이 없습니다.</div>'}
+    </div>
+    ${renderPager(page, pages, 'global-deny')}`;
+  box.querySelectorAll('.remove-global-deny-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const rule = btn.getAttribute('data-rule');
+      const ok = await confirmAsync(`${escapeHtml(rule)} 전역 차단 규칙을 해제할까요?`);
+      if(!ok) return;
+      try{
+        await api('/api/admin/tunnel-ip-deny', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({deny: currentGlobalDenyRules().filter(item=> item !== rule)}),
+        });
+        showToast('전역 차단 규칙을 해제했습니다.','ok');
+      }catch(err){
+        showToast(`전역 차단 해제 실패: ${err.message}`,'err',2800);
+      }
+    };
+  });
+  box.querySelectorAll('[data-page-group="global-deny"]').forEach(btn=>{
+    btn.onclick = ()=>{
+      globalDenyState.page = Number(btn.getAttribute('data-page-number') || '1');
+      renderGlobalDenyList();
+    };
+  });
+}
+
+function applyDashboardSnapshot(d){
+  if(!d) return;
+  lastSnapshot = d;
+  const t=d.tunnels||{}; const keys=Object.keys(t).sort();
+  const liveIps = keys.reduce((acc, key)=> acc + ((t[key].current_ips||[]).length), 0);
+  const rangeInfo = document.getElementById('rangeInfo');
+  rangeInfo.textContent = d.range || '';
+  rangeInfo.title = d.range || '';
+  document.getElementById('serverClock').textContent = (d.server_time || '-').replace('T',' ');
+  document.getElementById('statSubs').textContent = keys.length;
+  document.getElementById('statTCP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].tcp||{}).length,0);
+  document.getElementById('statUDP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].udp||{}).length,0);
+  document.getElementById('bwSubs').textContent = keys.length;
+  document.getElementById('statLiveIps').textContent = liveIps;
+  document.getElementById('statTokens').textContent = (d.tokens||[]).length;
+  document.getElementById('statGlobalDeny').textContent = (d.tunnel_ip_deny||[]).length;
+
+  const list=document.getElementById('list'); list.innerHTML="";
+  if(!keys.length){
+    list.innerHTML = `<div class="empty-state">현재 연결된 클라이언트가 없습니다. 클라이언트가 다시 연결되면 여기서 포트와 IP를 바로 제어할 수 있습니다.</div>`;
+  }
+  keys.forEach(sub=>{
+    const o=t[sub]||{};
+    const tcpItems=o.tcp_items||[];
+    const udpItems=o.udp_items||[];
+    const tcpList=tcpItems.map(item=>
+      `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
+    ).join("");
+    const udpList=udpItems.map(item=>
+      `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
+    ).join("");
+    const card=document.createElement('div');
+    card.className='tunnel-card';
+
+    const h=document.createElement('div'); h.className='tunnel-head';
+    const title=document.createElement('div');
+    title.innerHTML = `<h3>${escapeHtml(sub)}</h3>`;
+    h.appendChild(title);
+
+    const btnWrap=document.createElement('div'); btnWrap.className='tunnel-actions';
+    const manageBtn=document.createElement('button');
+    manageBtn.className='btn btn-primary btn-mini';
+    manageBtn.textContent='터널 관리';
+    manageBtn.onclick=()=> openTunnelManageModal(sub);
+    btnWrap.appendChild(manageBtn);
+
+    h.appendChild(btnWrap);
+    card.appendChild(h);
+
+    const info=document.createElement('div'); info.className='info-grid';
+    info.innerHTML = `
+      <div class="info-cell"><div class="label">Current IP</div><div class="value">${escapeHtml((o.current_ips||[]).length)}</div></div>
+      <div class="info-cell"><div class="label">TCP Streams</div><div class="value">${escapeHtml(o.tcp_streams||0)}</div></div>
+      <div class="info-cell"><div class="label">UDP Flows</div><div class="value">${escapeHtml(o.udp_flows||0)}</div></div>
+      <div class="info-cell"><div class="label">Managed Ports</div><div class="value">${escapeHtml((o.managed_tcp||[]).length + (o.managed_udp||[]).length)}</div></div>`;
+    card.appendChild(info);
+
+    const sec1=document.createElement('div'); sec1.className='mapping-block';
+    sec1.innerHTML='<h4>TCP 포트</h4><div class="chip-row">'+(tcpList||'<span class="subtle">등록된 TCP 포트가 없습니다.</span>')+'</div>';
+    const sec2=document.createElement('div'); sec2.className='mapping-block';
+    sec2.innerHTML='<h4>UDP 포트</h4><div class="chip-row">'+(udpList||'<span class="subtle">등록된 UDP 포트가 없습니다.</span>')+'</div>';
+
+    card.appendChild(sec1);
+    card.appendChild(sec2);
+    list.appendChild(card);
+  });
+
+  syncInputValue('ipAllow', (d.admin_ip_allow||[]).join(', '));
+  syncInputValue('tokens', (d.tokens||[]).join(', '));
+  syncCheckboxValue('botBlockEnabled', (d.bot_blocking||{}).enabled);
+  syncCheckboxValue('botBlockEmptyUa', (d.bot_blocking||{}).block_empty_ua);
+  syncInputValue('botRules', ((d.bot_blocking||{}).rules || []).join('\\n'));
+  renderGlobalDenyList();
+  renderBandwidthTable();
+  renderGlobalScheduleList(d);
+  loadTokenMeta();
+}
+
+async function requestDashboardSnapshot(timeout=2500){
+  if(ws && ws.readyState === WebSocket.OPEN){
+    try{
+      ws.send(JSON.stringify({type:'request_snapshot'}));
+      return await waitForSnapshot(timeout);
+    }catch(err){}
+  }
+  const d = await api('/api/tunnels');
+  applyDashboardSnapshot(d);
+  return d;
+}
+
 async function loadSnapshot(){
-  if(snapshotBusy){
-    snapshotQueued = true;
-    return lastSnapshot;
-  }
-  snapshotBusy = true;
-  try{
-    const d = await api('/api/tunnels');
-    if(!d) return lastSnapshot;
-    lastSnapshot = d;
-    const t=d.tunnels||{}; const keys=Object.keys(t).sort();
-    const liveIps = keys.reduce((acc, key)=> acc + ((t[key].current_ips||[]).length), 0);
-    const rangeInfo = document.getElementById('rangeInfo');
-    rangeInfo.textContent = d.range || '';
-    rangeInfo.title = d.range || '';
-    document.getElementById('serverClock').textContent = (d.server_time || '-').replace('T',' ');
-    document.getElementById('statSubs').textContent = keys.length;
-    document.getElementById('statTCP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].tcp||{}).length,0);
-    document.getElementById('statUDP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].udp||{}).length,0);
-    document.getElementById('bwSubs').textContent = keys.length;
-    document.getElementById('statLiveIps').textContent = liveIps;
-    document.getElementById('statTokens').textContent = (d.tokens||[]).length;
-    document.getElementById('statGlobalDeny').textContent = (d.tunnel_ip_deny||[]).length;
-
-    const list=document.getElementById('list'); list.innerHTML="";
-    if(!keys.length){
-      list.innerHTML = `<div class="empty-state">현재 연결된 클라이언트가 없습니다. 클라이언트가 다시 연결되면 여기서 포트와 IP를 바로 제어할 수 있습니다.</div>`;
-    }
-    keys.forEach(sub=>{
-      const o=t[sub]||{};
-      const tcpItems=o.tcp_items||[];
-      const udpItems=o.udp_items||[];
-      const tcpList=tcpItems.map(item=>
-        `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
-      ).join("");
-      const udpList=udpItems.map(item=>
-        `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
-      ).join("");
-      const card=document.createElement('div');
-      card.className='tunnel-card';
-
-      const h=document.createElement('div'); h.className='tunnel-head';
-      const title=document.createElement('div');
-      title.innerHTML = `<h3>${escapeHtml(sub)}</h3>`;
-      h.appendChild(title);
-
-      const btnWrap=document.createElement('div'); btnWrap.className='tunnel-actions';
-      const manageBtn=document.createElement('button');
-      manageBtn.className='btn btn-primary btn-mini';
-      manageBtn.textContent='터널 관리';
-      manageBtn.onclick=()=> openTunnelManageModal(sub);
-      btnWrap.appendChild(manageBtn);
-
-      h.appendChild(btnWrap);
-      card.appendChild(h);
-
-      const info=document.createElement('div'); info.className='info-grid';
-      info.innerHTML = `
-        <div class="info-cell"><div class="label">Current IP</div><div class="value">${escapeHtml((o.current_ips||[]).length)}</div></div>
-        <div class="info-cell"><div class="label">TCP Streams</div><div class="value">${escapeHtml(o.tcp_streams||0)}</div></div>
-        <div class="info-cell"><div class="label">UDP Flows</div><div class="value">${escapeHtml(o.udp_flows||0)}</div></div>
-        <div class="info-cell"><div class="label">Managed Ports</div><div class="value">${escapeHtml((o.managed_tcp||[]).length + (o.managed_udp||[]).length)}</div></div>`;
-      card.appendChild(info);
-
-      const sec1=document.createElement('div'); sec1.className='mapping-block';
-      sec1.innerHTML='<h4>TCP 포트</h4><div class="chip-row">'+(tcpList||'<span class="subtle">등록된 TCP 포트가 없습니다.</span>')+'</div>';
-      const sec2=document.createElement('div'); sec2.className='mapping-block';
-      sec2.innerHTML='<h4>UDP 포트</h4><div class="chip-row">'+(udpList||'<span class="subtle">등록된 UDP 포트가 없습니다.</span>')+'</div>';
-
-      card.appendChild(sec1);
-      card.appendChild(sec2);
-      list.appendChild(card);
-    });
-
-    syncInputValue('ipAllow', (d.admin_ip_allow||[]).join(', '));
-    syncInputValue('tokens', (d.tokens||[]).join(', '));
-    syncInputValue('denyIp', (d.tunnel_ip_deny||[]).join(', '));
-    syncCheckboxValue('botBlockEnabled', (d.bot_blocking||{}).enabled);
-    syncCheckboxValue('botBlockEmptyUa', (d.bot_blocking||{}).block_empty_ua);
-    syncInputValue('botRules', ((d.bot_blocking||{}).rules || []).join('\\n'));
-
-    renderBandwidthTable();
-    await renderGlobalScheduleList(d);
-    return d;
-  }finally{
-    snapshotBusy = false;
-    if(snapshotQueued){
-      snapshotQueued = false;
-      setTimeout(()=>{ loadSnapshot(); }, 50);
-    }
-  }
+  return requestDashboardSnapshot();
 }
 
 async function editTunnelSchedule(sub){
@@ -2306,7 +2461,7 @@ async function openTunnelManageModal(sub){
 }
 
 async function renderGlobalScheduleList(snapshot=null){
-  const d = snapshot || await api('/api/tunnels');
+  const d = snapshot || lastSnapshot || await requestDashboardSnapshot();
   const gl = (d && d.access_schedules) || [];
   const box = document.getElementById('schList');
   box.innerHTML = gl.length ? 
@@ -2316,7 +2471,7 @@ async function renderGlobalScheduleList(snapshot=null){
 
 /* ===== 토큰 메타 ===== */
 async function loadTokenMeta(){
-  const tm = await api('/api/admin/tokens/meta');
+  const tm = {items: ((lastSnapshot && lastSnapshot.token_meta) || [])};
   const box = document.getElementById('tokMeta'); box.innerHTML='';
   const tbl = document.createElement('table'); tbl.className='token-table';
   tbl.innerHTML = `<thead>
@@ -2361,6 +2516,9 @@ function connectWS(){
       if(msg.kind==='log'){
         const pre=document.getElementById('logs');
         pre.textContent += msg.line + "\\n"; pre.scrollTop = pre.scrollHeight;
+      }else if(msg.kind==='dashboard_snapshot'){
+        applyDashboardSnapshot(msg.snapshot);
+        resolveSnapshotWaiters(msg.snapshot);
       }else if(msg.kind==='bandwidth'){
         lastBandwidth = {
           items: msg.items || {},
@@ -2368,24 +2526,15 @@ function connectWS(){
         };
         renderBandwidthTable(lastBandwidth);
       }else if(['register','unregister','assigned','refresh'].includes(msg.kind)){
-        loadSnapshot();
-        loadTokenMeta().catch(()=>{});
+        requestDashboardSnapshot().catch(()=>{});
       }else if(msg.kind==='snapshot_logs'){
         const pre=document.getElementById('logs'); pre.textContent = (msg.lines||[]).join("\\n");
         pre.scrollTop = pre.scrollHeight;
       }
     }catch(e){}
   };
+  ws.onopen = ()=> { requestDashboardSnapshot().catch(()=>{}); };
   ws.onclose = ()=> setTimeout(connectWS, 2000);
-}
-function startAutoRefresh(){
-  if(autoRefreshHandle){
-    clearInterval(autoRefreshHandle);
-  }
-  autoRefreshHandle = setInterval(()=>{
-    loadSnapshot().catch(()=>{});
-    loadTokenMeta().catch(()=>{});
-  }, 5000);
 }
 
 /* ===== 집계/제한 모달 ===== */
@@ -2601,6 +2750,20 @@ async function setTunnelIpBlockState(sub, ip, blocked){
     body:JSON.stringify({ip}),
   });
 }
+async function setGlobalIpBlockState(ip, blocked){
+  const rules = currentGlobalDenyRules();
+  const next = blocked ? Array.from(new Set([...rules, ip])).sort() : rules.filter(rule => rule !== ip);
+  return api('/api/admin/tunnel-ip-deny', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({deny: next}),
+  });
+}
+function renderGlobalIpToggle(ip, scope){
+  return isGlobalBlocked(ip)
+    ? `<button class="btn btn-secondary btn-mini ${scope}-global-unblock-btn" data-ip="${escapeHtml(ip)}">전역 해제</button>`
+    : `<button class="btn btn-warning btn-mini ${scope}-global-block-btn" data-ip="${escapeHtml(ip)}">전역 차단</button>`;
+}
 
 function fmtDuration(ms){
   if(ms == null) return '-';
@@ -2655,6 +2818,7 @@ async function openHistoryDetailModal(sub, opts={}){
                 </div>
                 <div class="ip-actions">
                   <button class="btn btn-ghost btn-mini history-session-btn" data-ip="${escapeHtml(item.ip)}">세션 상세</button>
+                  ${renderGlobalIpToggle(item.ip, 'history')}
                   <button class="btn ${(lastSnapshot && lastSnapshot.tunnels && lastSnapshot.tunnels[sub] && (lastSnapshot.tunnels[sub].blocked_ips||[]).includes(item.ip)) ? 'btn-secondary history-unblock-btn' : 'btn-danger history-block-btn'} btn-mini" data-ip="${escapeHtml(item.ip)}">
                     ${(lastSnapshot && lastSnapshot.tunnels && lastSnapshot.tunnels[sub] && (lastSnapshot.tunnels[sub].blocked_ips||[]).includes(item.ip)) ? '차단 해제' : '즉시 차단'}
                   </button>
@@ -2662,7 +2826,7 @@ async function openHistoryDetailModal(sub, opts={}){
               </div>
             `).join('') : '<div class="empty-state">조건에 맞는 접속 기록이 없습니다.</div>'}
           </div>
-          ${renderPager(d.page || 1, d.pages || 1)}
+          ${renderPager(d.page || 1, d.pages || 1, 'history-detail')}
         </section>
       </div>`;
   };
@@ -2680,10 +2844,9 @@ async function openHistoryDetailModal(sub, opts={}){
         bindActions();
       };
     }
-    body.querySelectorAll('[data-page-nav]').forEach(btn=>{
+    body.querySelectorAll('[data-page-group="history-detail"]').forEach(btn=>{
       btn.onclick = async ()=>{
-        const dir = btn.getAttribute('data-page-nav');
-        const nextPage = dir === 'prev' ? Math.max(1, (data.page||1) - 1) : Math.min(data.pages||1, (data.page||1) + 1);
+        const nextPage = Number(btn.getAttribute('data-page-number') || state.page);
         if(nextPage === state.page) return;
         state.page = nextPage;
         data = await fetchData();
@@ -2726,6 +2889,38 @@ async function openHistoryDetailModal(sub, opts={}){
         }
       };
     });
+    body.querySelectorAll('.history-global-block-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        const ok = await confirmAsync(`${escapeHtml(ip)} 를 전역 차단할까요?<br><br>모든 터널에서 즉시 연결이 차단됩니다.`);
+        if(!ok) return;
+        try{
+          await setGlobalIpBlockState(ip, true);
+          await loadSnapshot();
+          data = await fetchData();
+          body.innerHTML = renderModal(data);
+          bindActions();
+          showToast(`${ip} 를 전역 차단했습니다.`,'ok');
+        }catch(err){
+          showToast(`전역 차단 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+    body.querySelectorAll('.history-global-unblock-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        try{
+          await setGlobalIpBlockState(ip, false);
+          await loadSnapshot();
+          data = await fetchData();
+          body.innerHTML = renderModal(data);
+          bindActions();
+          showToast(`${ip} 전역 차단을 해제했습니다.`,'ok');
+        }catch(err){
+          showToast(`전역 차단 해제 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
   };
 
   const title = state.date ? `접속 기록 (${sub} / ${state.date})` : `접속 기록 검색 (${sub})`;
@@ -2753,6 +2948,7 @@ async function openClientsModal(sub){
       </div>
       <div class="ip-actions">
         <button class="btn btn-ghost btn-mini current-session-btn" data-ip="${escapeHtml(ip)}">세션 상세</button>
+        ${renderGlobalIpToggle(ip, 'current')}
         ${blocked
           ? `<button class="btn btn-secondary btn-mini current-unblock-btn" data-ip="${escapeHtml(ip)}">차단 해제</button>`
           : `<button class="btn btn-danger btn-mini current-block-btn" data-ip="${escapeHtml(ip)}">즉시 차단</button>`
@@ -2848,12 +3044,13 @@ async function openClientsModal(sub){
             </div>
             <div class="ip-actions">
               <button class="btn btn-ghost btn-mini blocked-session-btn" data-ip="${escapeHtml(ip)}">세션 상세</button>
+              ${renderGlobalIpToggle(ip, 'blocked')}
               <button class="btn btn-secondary btn-mini blocked-unblock-btn" data-ip="${escapeHtml(ip)}">차단 해제</button>
             </div>
           </div>
         `).join('') : '<div class="empty-state">차단된 IP가 없습니다.</div>'}
       </div>
-      ${renderPager(page, pages)}`;
+      ${renderPager(page, pages, 'blocked-list')}`;
   };
 
   const renderModal = ()=>{
@@ -2920,6 +3117,36 @@ async function openClientsModal(sub){
         }
       };
     });
+    body.querySelectorAll('.current-global-block-btn,.blocked-global-block-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        const ok = await confirmAsync(`${escapeHtml(ip)} 를 전역 차단할까요?<br><br>모든 터널에서 즉시 연결이 차단됩니다.`);
+        if(!ok) return;
+        try{
+          await setGlobalIpBlockState(ip, true);
+          await loadSnapshot();
+          data = await fetchData();
+          rerender();
+          showToast(`${ip} 를 전역 차단했습니다.`,'ok');
+        }catch(err){
+          showToast(`전역 차단 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+    body.querySelectorAll('.current-global-unblock-btn,.blocked-global-unblock-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        try{
+          await setGlobalIpBlockState(ip, false);
+          await loadSnapshot();
+          data = await fetchData();
+          rerender();
+          showToast(`${ip} 전역 차단을 해제했습니다.`,'ok');
+        }catch(err){
+          showToast(`전역 차단 해제 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
     body.querySelectorAll('.current-unblock-btn,.blocked-unblock-btn').forEach(btn=>{
       btn.onclick = async ()=>{
         const ip = btn.getAttribute('data-ip');
@@ -2968,12 +3195,9 @@ async function openClientsModal(sub){
         rerender();
       };
     }
-    body.querySelectorAll('[data-page-nav]').forEach(btn=>{
+    body.querySelectorAll('[data-page-group="blocked-list"]').forEach(btn=>{
       btn.onclick = ()=>{
-        const dir = btn.getAttribute('data-page-nav');
-        const blocked = (data.blocked_ips || []).filter(ip=> !state.blockedQuery || ip.toLowerCase().includes(state.blockedQuery.toLowerCase()));
-        const pages = Math.max(1, Math.ceil(blocked.length / 6));
-        state.blockedPage = dir === 'prev' ? Math.max(1, state.blockedPage - 1) : Math.min(pages, state.blockedPage + 1);
+        state.blockedPage = Number(btn.getAttribute('data-page-number') || state.blockedPage);
         rerender();
       };
     });
@@ -3179,12 +3403,12 @@ async function openPortManageModal(sub){
 /* ===== 전역 스케줄 저장 버튼 동작 ===== */
 document.getElementById('saveSch').onclick = async ()=>{
   try{
-    const snap = await api('/api/tunnels');
+    const snap = lastSnapshot || await loadSnapshot();
     const cur = (snap && snap.access_schedules) || [];
     const items = await openScheduleModal('GLOBAL', cur);
     if(items===null) return;
     await api('/api/admin/schedule', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(items)});
-    await renderGlobalScheduleList();
+    await loadSnapshot();
     showToast('전역 시간대가 저장되었습니다.','ok');
   }catch(err){
     showToast(`전역 시간대 저장 실패: ${err.message}`,'err',2800);
@@ -3192,7 +3416,6 @@ document.getElementById('saveSch').onclick = async ()=>{
 };
 
 /* 초기/기타 액션 */
-document.getElementById('refreshBtn').onclick = ()=>{ loadSnapshot(); showToast('새로고침 완료','ok'); };
 document.getElementById('prevLogsBtn').onclick = loadLogListAndOpenFirst;
 document.getElementById('openAgg').onclick = openAggModal;
 document.querySelectorAll('.rail-link').forEach(link=>{
@@ -3217,6 +3440,7 @@ document.getElementById('saveIp').onclick = async ()=>{
   const arr = raw ? raw.split(',').map(s=>s.trim()).filter(Boolean) : [];
   try{
     await api('/api/admin/ip-allow', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({allow:arr})});
+    await loadSnapshot();
     showToast('접근 허용 목록을 저장했습니다.','ok');
   }catch(err){
     showToast(`허용 목록 저장 실패: ${err.message}`,'err',2800);
@@ -3228,22 +3452,32 @@ document.getElementById('saveTok').onclick = async ()=>{
   try{
     await api('/api/admin/tokens', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tokens:arr})});
     await loadSnapshot();
-    await loadTokenMeta();
     showToast('토큰 목록을 저장했습니다.','ok');
   }catch(err){
     showToast(`토큰 저장 실패: ${err.message}`,'err',2800);
   }
 };
-document.getElementById('saveDeny').onclick = async ()=>{
-  const raw=document.getElementById('denyIp').value.trim();
+document.getElementById('addDenyBtn').onclick = async ()=>{
+  const raw=document.getElementById('denyRuleInput').value.trim();
   const arr = raw ? raw.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  if(!arr.length){
+    showToast('추가할 차단 규칙을 입력하세요.','warn');
+    return;
+  }
   try{
-    await api('/api/admin/tunnel-ip-deny', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({deny:arr})});
+    const next = Array.from(new Set([...currentGlobalDenyRules(), ...arr])).sort();
+    await api('/api/admin/tunnel-ip-deny', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({deny:next})});
     await loadSnapshot();
+    document.getElementById('denyRuleInput').value = '';
     showToast('전역 차단 규칙을 저장했습니다.','ok');
   }catch(err){
     showToast(`전역 차단 저장 실패: ${err.message}`,'err',2800);
   }
+};
+document.getElementById('denySearchBtn').onclick = ()=>{
+  globalDenyState.query = document.getElementById('denySearchInput').value.trim();
+  globalDenyState.page = 1;
+  renderGlobalDenyList();
 };
 document.getElementById('saveBot').onclick = async ()=>{
   const payload = {
@@ -3268,15 +3502,16 @@ document.getElementById('clearLog').onclick = async ()=>{
     showToast(`로그 초기화 실패: ${err.message}`,'err',2800);
   }
 };
+document.getElementById('refreshBtn').onclick = async ()=>{
+  await requestDashboardSnapshot();
+  showToast('WS 스냅샷을 다시 요청했습니다.','ok');
+};
 
 /* 초기 로드 */
 switchSection('overviewSection');
 renderBandwidthTable();
-loadSnapshot();
 loadLogList();
-loadTokenMeta();
 connectWS();
-startAutoRefresh();
 </script>
 </body></html>
 """
@@ -3336,8 +3571,17 @@ async def admin_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     ADMIN_WSS.append(ws)
     await ws.send_json({"kind":"snapshot_logs","lines": list(LOG_RING)})
+    await send_dashboard_snapshot(ws)
     try:
-        async for _ in ws: pass
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                data = json.loads(msg.data)
+            except Exception:
+                continue
+            if data.get("type") == "request_snapshot":
+                await send_dashboard_snapshot(ws)
     finally:
         with contextlib.suppress(ValueError):
             ADMIN_WSS.remove(ws)
@@ -3346,40 +3590,7 @@ async def admin_ws(request: web.Request) -> web.WebSocketResponse:
 # ====== 관리 API ======
 @require_admin
 async def api_tunnels(request: web.Request) -> web.Response:
-    return web.json_response({
-        "ok": True,
-        "range": f"TCP {TCP_START}-{TCP_END} / UDP {UDP_START}-{UDP_END}",
-        "admin_ip_allow": STATE.get("admin_ip_allow", []),
-        "access_schedules": STATE.get("access_schedules", []),
-        "bot_blocking": normalized_bot_blocking(STATE.get("bot_blocking")),
-        "tokens": list(ALLOWED_TOKENS),
-        "tunnel_ip_deny": STATE.get("tunnel_ip_deny", []),
-        "server_time": datetime.datetime.now().replace(microsecond=0).isoformat(),
-        "tunnels": {
-            k:{
-                "tcp":{n:v["port"] for n,v in TUNNELS[k].get("tcp",{}).items()},
-                "udp":{n:v["port"] for n,v in TUNNELS[k].get("udp",{}).items()},
-                "tcp_items": sorted([
-                    {"name":n, "remote_port":v["port"], "managed":bool(v.get("managed"))}
-                    for n,v in TUNNELS[k].get("tcp",{}).items()
-                ], key=lambda item: item["name"]),
-                "udp_items": sorted([
-                    {"name":n, "remote_port":v["port"], "managed":bool(v.get("managed"))}
-                    for n,v in TUNNELS[k].get("udp",{}).items()
-                ], key=lambda item: item["name"]),
-                "tcp_streams": sum(len(v["streams"]) for v in TUNNELS[k].get("tcp",{}).values()),
-                "udp_flows":   sum(len(v["flows"]) for v in TUNNELS[k].get("udp",{}).values()),
-                "current_ips": _current_ips_for(k),
-                "blocked_ips": ((STATE.get("per_tunnel_ip_deny") or {}).get(k, []) or []),
-                "connected_at": TUNNELS[k].get("connected_at"),
-                "peer_ip": TUNNELS[k].get("peer_ip"),
-                "managed_tcp": sorted([n for n,v in TUNNELS[k].get("tcp",{}).items() if v.get("managed")]),
-                "managed_udp": sorted([n for n,v in TUNNELS[k].get("udp",{}).items() if v.get("managed")]),
-                "suppressed_tcp": suppressed_mapping_bucket(k).get("tcp", []),
-                "suppressed_udp": suppressed_mapping_bucket(k).get("udp", []),
-            } for k in TUNNELS.keys()
-        }
-    })
+    return web.json_response(dashboard_snapshot_payload())
 
 @require_admin
 async def api_disconnect(request: web.Request) -> web.Response:
@@ -3405,6 +3616,7 @@ async def api_set_ip_allow(request: web.Request) -> web.Response:
     allow = body.get("allow") or []
     STATE["admin_ip_allow"] = allow
     save_state(STATE)
+    broadcast_refresh()
     return web.json_response({"ok":True,"admin_ip_allow":allow})
 
 @require_admin
@@ -3420,17 +3632,12 @@ async def api_set_tokens(request: web.Request) -> web.Response:
     save_state(STATE)
     ring_log(f"ADMIN updated tokens: {len(ALLOWED_TOKENS)} tokens")
     broadcast({"kind":"log","line":"[ADMIN] tokens updated"})
+    broadcast_refresh()
     return web.json_response({"ok":True,"tokens":list(ALLOWED_TOKENS)})
 
 @require_admin
 async def api_token_meta(request: web.Request) -> web.Response:
-    items=[]
-    meta = STATE.get("token_meta", {})
-    keys = sorted(set(ALLOWED_TOKENS) | set(meta.keys()))
-    for tk in keys:
-        m = meta.get(tk, {})
-        items.append({"token": tk, "last_ip": m.get("last_ip"), "last_at": m.get("last_at")})
-    return web.json_response({"ok":True,"items":items})
+    return web.json_response({"ok":True,"items":token_meta_items()})
 
 @require_admin
 async def api_token_revoke(request: web.Request) -> web.Response:
@@ -3462,6 +3669,7 @@ async def api_token_revoke(request: web.Request) -> web.Response:
 @require_admin
 async def api_logs_clear(request: web.Request) -> web.Response:
     LOG_RING.clear()
+    broadcast({"kind":"snapshot_logs","lines":[]})
     return web.json_response({"ok":True})
 
 @require_admin
@@ -3484,6 +3692,7 @@ async def api_schedule_set(request: web.Request) -> web.Response:
     save_state(STATE)
     ring_log(f"ADMIN updated schedule: {len(norm)} rules")
     broadcast({"kind":"log","line":"[ADMIN] schedule updated"})
+    broadcast_refresh()
     return web.json_response({"ok":True,"items":norm})
 
 @require_admin
@@ -3518,7 +3727,7 @@ async def api_tunnel_schedule_set(request: web.Request) -> web.Response:
 @require_admin
 async def api_set_tunnel_deny(request: web.Request) -> web.Response:
     body = await request.json()
-    deny = [x.strip() for x in (body.get("deny") or []) if x.strip()]
+    deny = sorted(dict.fromkeys([x.strip() for x in (body.get("deny") or []) if x.strip()]))
     STATE["tunnel_ip_deny"] = deny
     save_state(STATE)
     await disconnect_blocked_ips()
@@ -3897,6 +4106,14 @@ async def bw_loop():
         payload = {"kind":"bandwidth","ts": time.time(), "items": items, "total": total}
         broadcast(payload)
 
+
+async def admin_snapshot_loop():
+    while True:
+        await asyncio.sleep(3.0)
+        if not ADMIN_WSS:
+            continue
+        broadcast_refresh()
+
 # = 앱 구성 =
 async def make_app() -> web.Application:
     app = web.Application(client_max_size=64*1024*1024, middlewares=[admin_ip_mw])
@@ -3948,6 +4165,7 @@ async def make_app() -> web.Application:
         web.route("*","/{tail:.*}", public_http_handler),
     ])
     app["bw_task"] = asyncio.create_task(bw_loop())
+    app["admin_snapshot_task"] = asyncio.create_task(admin_snapshot_loop())
     return app
 
 def main():
