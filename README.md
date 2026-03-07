@@ -9,7 +9,7 @@
 
 ## ✨ 주요 기능
 
-<img width="1286" height="1282" alt="image" src="https://github.com/user-attachments/assets/8f3750ab-c780-4c37-9df8-85862d681f8e" />
+<img width="2556" height="1302" alt="image" src="https://github.com/user-attachments/assets/3bbca0d6-4e78-468b-bc14-7fd5bc68a787" />
 
 
 -   **멀티 프로토콜**: TCP / UDP / HTTP 프록시 지원
