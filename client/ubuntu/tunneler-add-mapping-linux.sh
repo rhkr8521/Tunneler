@@ -23,6 +23,7 @@ fi
 # 현재 설정 파싱
 WS_URL="$(echo "$EXEC_LINE" | sed -E 's#.*client\.py" "([^"]+)".*#\1#')"
 SUBDOMAIN="$(echo "$EXEC_LINE" | sed -E 's#.*client\.py" "[^"]+" "([^"]+)".*#\1#')"
+TOKEN="$(echo "$EXEC_LINE" | sed -E 's#.*client\.py" "[^"]+" "[^"]+" "([^"]+)".*#\1#')"
 
 list_current() {
   echo "=== 현재 매핑 ==="
@@ -120,8 +121,9 @@ HOSTPORT="$(echo "${WS_URL}" | sed -E 's#^(ws|wss)://##' | cut -d'/' -f1)"
 [[ "$SCHEME" == "wss" ]] && BASE="https://${HOSTPORT}" || BASE="http://${HOSTPORT}"
 
 set +e
-HEALTH_JSON="$(curl -ksS --max-time 5 "${BASE}/_health")"
-if [[ $? -eq 0 && -n "$HEALTH_JSON" ]]; then
+TOKEN_ENC="$(jq -rn --arg v "$TOKEN" '$v|@uri')"
+HEALTH_JSON="$(curl -ksS --max-time 5 "${BASE}/_health?token=${TOKEN_ENC}")"
+if [[ -n "$TOKEN" && $? -eq 0 && -n "$HEALTH_JSON" ]]; then
   echo "$HEALTH_JSON" | jq -r --arg sd "$SUBDOMAIN" '
     .tunnels[$sd] as $t
     | if $t == null then
@@ -132,7 +134,6 @@ if [[ $? -eq 0 && -n "$HEALTH_JSON" ]]; then
       end
   '
 else
-  echo "(헬스 조회 실패)"
+  echo "(헬스 조회 실패: 토큰 또는 연결 상태를 확인하세요)"
 fi
 set -e
-

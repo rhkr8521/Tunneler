@@ -225,11 +225,24 @@ def _save_sessions_if_needed(force=False):
     except Exception as e:
         logger.warning("sessions save failed: %s", e)
 
-def _start_session(sub: str, ip: str, when: Optional[datetime.datetime]=None):
+def _start_session(
+    sub: str,
+    ip: str,
+    when: Optional[datetime.datetime]=None,
+    proto: Optional[str]=None,
+    mapping_name: Optional[str]=None,
+    remote_port: int=0,
+):
     global _sessions_dirty
     if not when: when = datetime.datetime.now()
     day = when.strftime("%Y-%m-%d")
     rec = {"start": when.replace(microsecond=0).isoformat(), "end": None}
+    if proto:
+        rec["proto"] = proto
+    if mapping_name:
+        rec["mapping"] = mapping_name
+    if remote_port > 0:
+        rec["remote_port"] = int(remote_port)
     arr = SESSIONS.setdefault(sub, {}).setdefault(day, {}).setdefault(ip, [])
     arr.append(rec); _sessions_dirty = True
     return (sub, day, ip, len(arr)-1)
@@ -939,7 +952,7 @@ async def attach_tcp_mapping(subdomain: str, ws: web.WebSocketResponse, name: st
                 await writer.wait_closed()
             return
         sid = str(uuid.uuid4())
-        sess_key = _start_session(_sub, rip)
+        sess_key = _start_session(_sub, rip, proto="tcp", mapping_name=_name, remote_port=port)
         TUNNELS[_sub]["tcp"][_name]["streams"][sid] = {"reader":reader,"writer":writer,"rip":rip,"sess_key":sess_key}
         _ip_inc(_sub, rip)
         _record_ip_seen(_sub, rip)
@@ -1001,7 +1014,7 @@ async def attach_udp_mapping(subdomain: str, ws: web.WebSocketResponse, name: st
                 return
             if addr not in flows:
                 fid = str(uuid.uuid4())
-                sess_key = _start_session(subdomain, rip)
+                sess_key = _start_session(subdomain, rip, proto="udp", mapping_name=name, remote_port=port)
                 flows[addr] = {"flow_id":fid,"last":loop.time(),"rip":rip,"sess_key":sess_key}
                 _ip_inc(subdomain, rip)
                 _record_ip_seen(subdomain, rip)
@@ -1228,13 +1241,22 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 # 공개 HTTP 프록시 + /_health
 async def public_http_handler(request: web.Request) -> web.StreamResponse:
     if request.path == "/_health":
+        token = (request.rel_url.query.get("token") or "").strip()
+        if not token:
+            return web.json_response({"ok": False, "reason": "token_required"}, status=401)
+        allowed, reason = verify_auth(token)
+        if not allowed:
+            return web.json_response({"ok": False, "reason": reason or "unauthorized"}, status=403)
         return web.json_response({
             "ok": True,
+            "token": token,
             "tunnels": {
                 k:{
                     "tcp":{n:v["port"] for n,v in TUNNELS[k].get("tcp",{}).items()},
                     "udp":{n:v["port"] for n,v in TUNNELS[k].get("udp",{}).items()},
-                } for k in TUNNELS.keys()
+                }
+                for k, info in TUNNELS.items()
+                if info.get("auth_token") == token
             }
         })
 
@@ -1486,7 +1508,7 @@ button,input,select,textarea{font:inherit}
 .hero h1{margin:6px 0 10px;font-size:36px;line-height:1.05;letter-spacing:-.04em}
 .hero p{margin:0;color:var(--muted);max-width:760px;line-height:1.6}
 .hero-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
-.top-strip{display:grid;grid-template-columns:minmax(440px,1.65fr) repeat(2,minmax(220px,1fr));gap:16px;margin-bottom:22px}
+.top-strip{display:grid;grid-template-columns:minmax(520px,1.9fr) repeat(2,minmax(220px,1fr));gap:16px;margin-bottom:22px}
 .btn{
   appearance:none;border:none;border-radius:16px;padding:12px 16px;font-weight:600;cursor:pointer;
   display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:.18s ease;
@@ -1504,7 +1526,12 @@ button,input,select,textarea{font:inherit}
 .stat-card{border-radius:24px;padding:18px}
 .stat-card .label{font-size:13px;color:var(--muted)}
 .stat-card .value{margin-top:8px;font-size:28px;font-weight:700;letter-spacing:-.04em}
-#rangeInfo{white-space:nowrap;font-size:clamp(15px,1.35vw,18px);line-height:1.2}
+.range-card{min-width:0}
+#rangeInfo{
+  font-size:clamp(13px,.95vw,16px) !important;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+}
+.throughput-line{margin-top:10px;display:flex;flex-wrap:wrap;gap:16px;font-size:14px;color:var(--muted)}
+.throughput-line strong{display:inline-block;margin-left:6px;font-size:20px;color:var(--ink);letter-spacing:-.03em}
 .panel{border-radius:28px;padding:20px}
 .panel-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}
 .panel-head h2,.panel-head h3{margin:0;font-size:22px;letter-spacing:-.03em}
@@ -1567,6 +1594,34 @@ button,input,select,textarea{font:inherit}
 .action-copy{flex:1;text-align:left}
 .action-copy span{display:block;margin-top:4px;font-size:13px;color:var(--muted)}
 .mapping-list{display:flex;flex-direction:column;gap:10px}
+.search-inline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search-inline input{
+  min-width:0;flex:1;border:1px solid var(--line);border-radius:14px;padding:10px 12px;background:#fffdfa;color:var(--ink)
+}
+.calendar-shell{display:flex;flex-direction:column;gap:12px}
+.calendar-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.calendar-weekday{
+  text-align:center;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;padding-bottom:4px
+}
+.calendar-cell,.calendar-empty{
+  min-height:88px;border-radius:18px;border:1px solid rgba(19,33,27,.08);background:rgba(255,255,255,.72);padding:10px
+}
+.calendar-empty{background:rgba(255,255,255,.42);border-style:dashed}
+.calendar-day{
+  width:100%;height:100%;border:none;background:transparent;padding:0;display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between;
+  color:var(--ink);cursor:pointer
+}
+.calendar-day.disabled{cursor:default;color:var(--muted)}
+.calendar-day.has-data{font-weight:700}
+.calendar-day .count{
+  display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#edf6ef;color:#0f4f32
+}
+.list-stack{display:flex;flex-direction:column;gap:10px}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}
+.pager-controls{display:flex;gap:8px}
+.pager-info{font-size:13px;color:var(--muted)}
+.session-meta{display:flex;flex-wrap:wrap;gap:8px}
 .mapping-row{
   display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;border-radius:18px;
   border:1px solid rgba(19,33,27,.08);background:rgba(255,255,255,.76)
@@ -1645,7 +1700,7 @@ button,input,select,textarea{font:inherit}
     </section>
 
     <section class="top-strip">
-      <div class="stat-card">
+      <div class="stat-card range-card">
         <div class="label">Port Range</div>
         <div class="value" id="rangeInfo">-</div>
       </div>
@@ -1655,7 +1710,10 @@ button,input,select,textarea{font:inherit}
       </div>
       <div class="stat-card">
         <div class="label">Live Throughput</div>
-        <div class="value"><span id="totalUp">0 B/s</span> / <span id="totalDown">0 B/s</span></div>
+        <div class="throughput-line">
+          <span>In <strong id="totalIn">0 B/s</strong></span>
+          <span>Out <strong id="totalOut">0 B/s</strong></span>
+        </div>
       </div>
     </section>
 
@@ -1672,7 +1730,6 @@ button,input,select,textarea{font:inherit}
         <div class="panel-head">
           <div>
             <h2>활성 터널</h2>
-            <p>터널 카드는 간단히 유지하고, 상세 제어는 터널 관리 모달에서 처리합니다.</p>
           </div>
         </div>
         <div id="list" class="tunnel-grid"></div>
@@ -1781,13 +1838,13 @@ button,input,select,textarea{font:inherit}
         <div class="panel-head">
           <div>
             <h3>실시간 대역폭</h3>
-            <p>초당 업/다운 트래픽을 터널별로 집계합니다.</p>
+            <p>초당 In / Out 트래픽을 터널별로 집계합니다.</p>
           </div>
         </div>
         <div class="overflow-x-auto">
           <table class="bw-table">
             <thead>
-              <tr><th>Subdomain</th><th>Up</th><th>Down</th></tr>
+              <tr><th>Subdomain</th><th>In</th><th>Out</th></tr>
             </thead>
             <tbody id="bwBody"></tbody>
           </table>
@@ -1823,6 +1880,11 @@ button,input,select,textarea{font:inherit}
 
 <script>
 let ws;
+let lastSnapshot = null;
+let lastBandwidth = {items:{}, total:{tx:0, rx:0}};
+let snapshotBusy = false;
+let snapshotQueued = false;
+let autoRefreshHandle = null;
 
 /* ===== 토스트/모달 유틸 ===== */
 function showToast(msg, type='info', ms=2200){
@@ -1941,6 +2003,64 @@ function formatLogMeta(meta){
   const modified = meta.modified_at ? meta.modified_at.replace('T',' ') : '';
   return [size, modified].filter(Boolean).join(' · ');
 }
+function syncInputValue(id, value){
+  const el = document.getElementById(id);
+  if(!el || document.activeElement === el) return;
+  el.value = value;
+}
+function syncCheckboxValue(id, checked){
+  const el = document.getElementById(id);
+  if(!el || document.activeElement === el) return;
+  el.checked = Boolean(checked);
+}
+function formatMonthLabel(key){
+  const [year, month] = String(key || '').split('-').map(Number);
+  if(!year || !month) return key || '';
+  return `${year}.${String(month).padStart(2,'0')}`;
+}
+function monthKeyFromDate(date){
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;
+}
+function parseMonthKey(key){
+  const [year, month] = String(key || '').split('-').map(Number);
+  return new Date(year || new Date().getFullYear(), (month || 1) - 1, 1);
+}
+function shiftMonth(key, diff){
+  const date = parseMonthKey(key);
+  date.setMonth(date.getMonth() + diff, 1);
+  return monthKeyFromDate(date);
+}
+function renderPager(page, pages){
+  return `
+    <div class="pager">
+      <div class="pager-info">${page} / ${pages} 페이지</div>
+      <div class="pager-controls">
+        <button class="btn btn-ghost btn-mini" data-page-nav="prev">이전</button>
+        <button class="btn btn-ghost btn-mini" data-page-nav="next">다음</button>
+      </div>
+    </div>`;
+}
+function renderBandwidthTable(payload = lastBandwidth){
+  const tbody = document.getElementById('bwBody');
+  if(!tbody) return;
+  const snapshotTunnels = (lastSnapshot && lastSnapshot.tunnels) || {};
+  const items = (payload && payload.items) || {};
+  const total = (payload && payload.total) || {tx:0, rx:0};
+  document.getElementById('totalIn').textContent = formatRate(total.rx || 0);
+  document.getElementById('totalOut').textContent = formatRate(total.tx || 0);
+  const subs = Array.from(new Set([...Object.keys(snapshotTunnels), ...Object.keys(items)])).sort();
+  tbody.innerHTML = '';
+  if(!subs.length){
+    tbody.innerHTML = `<tr><td colspan="3"><span class="subtle">표시할 터널이 없습니다.</span></td></tr>`;
+    return;
+  }
+  subs.forEach(sub=>{
+    const v = items[sub] || {tx:0, rx:0};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escapeHtml(sub)}</td><td>${formatRate(v.rx||0)}</td><td>${formatRate(v.tx||0)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
 
 /* ===== 로그 목록 ===== */
 async function loadLogList(){
@@ -1975,80 +2095,97 @@ async function loadLogListAndOpenFirst(){
 }
 
 /* ===== 스냅샷 ===== */
-let lastSnapshot = null;
 async function loadSnapshot(){
-  const d = await api('/api/tunnels'); if(!d) return;
-  lastSnapshot = d;
-  const t=d.tunnels||{}; const keys=Object.keys(t).sort();
-  const liveIps = keys.reduce((acc, key)=> acc + ((t[key].current_ips||[]).length), 0);
-  document.getElementById('rangeInfo').textContent = d.range || '';
-  document.getElementById('serverClock').textContent = (d.server_time || '-').replace('T',' ');
-  document.getElementById('statSubs').textContent = keys.length;
-  document.getElementById('statTCP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].tcp||{}).length,0);
-  document.getElementById('statUDP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].udp||{}).length,0);
-  document.getElementById('bwSubs').textContent = keys.length;
-  document.getElementById('statLiveIps').textContent = liveIps;
-  document.getElementById('statTokens').textContent = (d.tokens||[]).length;
-  document.getElementById('statGlobalDeny').textContent = (d.tunnel_ip_deny||[]).length;
-
-  const list=document.getElementById('list'); list.innerHTML="";
-  if(!keys.length){
-    list.innerHTML = `<div class="empty-state">현재 연결된 클라이언트가 없습니다. 클라이언트가 다시 연결되면 여기서 포트와 IP를 바로 제어할 수 있습니다.</div>`;
+  if(snapshotBusy){
+    snapshotQueued = true;
+    return lastSnapshot;
   }
-  keys.forEach(sub=>{
-    const o=t[sub]||{};
-    const tcpItems=o.tcp_items||[];
-    const udpItems=o.udp_items||[];
-    const tcpList=tcpItems.map(item=>
-      `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
-    ).join("");
-    const udpList=udpItems.map(item=>
-      `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
-    ).join("");
-    const card=document.createElement('div');
-    card.className='tunnel-card';
+  snapshotBusy = true;
+  try{
+    const d = await api('/api/tunnels');
+    if(!d) return lastSnapshot;
+    lastSnapshot = d;
+    const t=d.tunnels||{}; const keys=Object.keys(t).sort();
+    const liveIps = keys.reduce((acc, key)=> acc + ((t[key].current_ips||[]).length), 0);
+    const rangeInfo = document.getElementById('rangeInfo');
+    rangeInfo.textContent = d.range || '';
+    rangeInfo.title = d.range || '';
+    document.getElementById('serverClock').textContent = (d.server_time || '-').replace('T',' ');
+    document.getElementById('statSubs').textContent = keys.length;
+    document.getElementById('statTCP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].tcp||{}).length,0);
+    document.getElementById('statUDP').textContent = keys.reduce((a,k)=>a+Object.keys(t[k].udp||{}).length,0);
+    document.getElementById('bwSubs').textContent = keys.length;
+    document.getElementById('statLiveIps').textContent = liveIps;
+    document.getElementById('statTokens').textContent = (d.tokens||[]).length;
+    document.getElementById('statGlobalDeny').textContent = (d.tunnel_ip_deny||[]).length;
 
-    const h=document.createElement('div'); h.className='tunnel-head';
-    const title=document.createElement('div');
-    title.innerHTML = `<h3>${escapeHtml(sub)}</h3>`;
-    h.appendChild(title);
+    const list=document.getElementById('list'); list.innerHTML="";
+    if(!keys.length){
+      list.innerHTML = `<div class="empty-state">현재 연결된 클라이언트가 없습니다. 클라이언트가 다시 연결되면 여기서 포트와 IP를 바로 제어할 수 있습니다.</div>`;
+    }
+    keys.forEach(sub=>{
+      const o=t[sub]||{};
+      const tcpItems=o.tcp_items||[];
+      const udpItems=o.udp_items||[];
+      const tcpList=tcpItems.map(item=>
+        `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
+      ).join("");
+      const udpList=udpItems.map(item=>
+        `<span class="chip">${item.managed ? 'S' : 'C'} <strong>${escapeHtml(item.name)}</strong> ${escapeHtml(item.remote_port)}</span>`
+      ).join("");
+      const card=document.createElement('div');
+      card.className='tunnel-card';
 
-    const btnWrap=document.createElement('div'); btnWrap.className='tunnel-actions';
-    const manageBtn=document.createElement('button');
-    manageBtn.className='btn btn-primary btn-mini';
-    manageBtn.textContent='터널 관리';
-    manageBtn.onclick=()=> openTunnelManageModal(sub);
-    btnWrap.appendChild(manageBtn);
+      const h=document.createElement('div'); h.className='tunnel-head';
+      const title=document.createElement('div');
+      title.innerHTML = `<h3>${escapeHtml(sub)}</h3>`;
+      h.appendChild(title);
 
-    h.appendChild(btnWrap);
-    card.appendChild(h);
+      const btnWrap=document.createElement('div'); btnWrap.className='tunnel-actions';
+      const manageBtn=document.createElement('button');
+      manageBtn.className='btn btn-primary btn-mini';
+      manageBtn.textContent='터널 관리';
+      manageBtn.onclick=()=> openTunnelManageModal(sub);
+      btnWrap.appendChild(manageBtn);
 
-    const info=document.createElement('div'); info.className='info-grid';
-    info.innerHTML = `
-      <div class="info-cell"><div class="label">Current IP</div><div class="value">${escapeHtml((o.current_ips||[]).length)}</div></div>
-      <div class="info-cell"><div class="label">TCP Streams</div><div class="value">${escapeHtml(o.tcp_streams||0)}</div></div>
-      <div class="info-cell"><div class="label">UDP Flows</div><div class="value">${escapeHtml(o.udp_flows||0)}</div></div>
-      <div class="info-cell"><div class="label">Managed Ports</div><div class="value">${escapeHtml((o.managed_tcp||[]).length + (o.managed_udp||[]).length)}</div></div>`;
-    card.appendChild(info);
+      h.appendChild(btnWrap);
+      card.appendChild(h);
 
-    const sec1=document.createElement('div'); sec1.className='mapping-block';
-    sec1.innerHTML='<h4>TCP 포트</h4><div class="chip-row">'+(tcpList||'<span class="subtle">등록된 TCP 포트가 없습니다.</span>')+'</div>';
-    const sec2=document.createElement('div'); sec2.className='mapping-block';
-    sec2.innerHTML='<h4>UDP 포트</h4><div class="chip-row">'+(udpList||'<span class="subtle">등록된 UDP 포트가 없습니다.</span>')+'</div>';
+      const info=document.createElement('div'); info.className='info-grid';
+      info.innerHTML = `
+        <div class="info-cell"><div class="label">Current IP</div><div class="value">${escapeHtml((o.current_ips||[]).length)}</div></div>
+        <div class="info-cell"><div class="label">TCP Streams</div><div class="value">${escapeHtml(o.tcp_streams||0)}</div></div>
+        <div class="info-cell"><div class="label">UDP Flows</div><div class="value">${escapeHtml(o.udp_flows||0)}</div></div>
+        <div class="info-cell"><div class="label">Managed Ports</div><div class="value">${escapeHtml((o.managed_tcp||[]).length + (o.managed_udp||[]).length)}</div></div>`;
+      card.appendChild(info);
 
-    card.appendChild(sec1);
-    card.appendChild(sec2);
-    list.appendChild(card);
-  });
+      const sec1=document.createElement('div'); sec1.className='mapping-block';
+      sec1.innerHTML='<h4>TCP 포트</h4><div class="chip-row">'+(tcpList||'<span class="subtle">등록된 TCP 포트가 없습니다.</span>')+'</div>';
+      const sec2=document.createElement('div'); sec2.className='mapping-block';
+      sec2.innerHTML='<h4>UDP 포트</h4><div class="chip-row">'+(udpList||'<span class="subtle">등록된 UDP 포트가 없습니다.</span>')+'</div>';
 
-  document.getElementById('ipAllow').value = (d.admin_ip_allow||[]).join(', ');
-  document.getElementById('tokens').value = (d.tokens||[]).join(', ');
-  document.getElementById('denyIp').value = (d.tunnel_ip_deny||[]).join(', ');
-  document.getElementById('botBlockEnabled').checked = Boolean((d.bot_blocking||{}).enabled);
-  document.getElementById('botBlockEmptyUa').checked = Boolean((d.bot_blocking||{}).block_empty_ua);
-  document.getElementById('botRules').value = ((d.bot_blocking||{}).rules || []).join('\\n');
+      card.appendChild(sec1);
+      card.appendChild(sec2);
+      list.appendChild(card);
+    });
 
-  await renderGlobalScheduleList(d); // 전역 시간대 리스트 반영
+    syncInputValue('ipAllow', (d.admin_ip_allow||[]).join(', '));
+    syncInputValue('tokens', (d.tokens||[]).join(', '));
+    syncInputValue('denyIp', (d.tunnel_ip_deny||[]).join(', '));
+    syncCheckboxValue('botBlockEnabled', (d.bot_blocking||{}).enabled);
+    syncCheckboxValue('botBlockEmptyUa', (d.bot_blocking||{}).block_empty_ua);
+    syncInputValue('botRules', ((d.bot_blocking||{}).rules || []).join('\\n'));
+
+    renderBandwidthTable();
+    await renderGlobalScheduleList(d);
+    return d;
+  }finally{
+    snapshotBusy = false;
+    if(snapshotQueued){
+      snapshotQueued = false;
+      setTimeout(()=>{ loadSnapshot(); }, 50);
+    }
+  }
 }
 
 async function editTunnelSchedule(sub){
@@ -2225,22 +2362,14 @@ function connectWS(){
         const pre=document.getElementById('logs');
         pre.textContent += msg.line + "\\n"; pre.scrollTop = pre.scrollHeight;
       }else if(msg.kind==='bandwidth'){
-        const tbody=document.getElementById('bwBody');
-        const items = msg.items||{};
-        const tot = msg.total || {tx:0, rx:0};
-        document.getElementById('totalUp').textContent = formatRate(tot.tx||0);
-        document.getElementById('totalDown').textContent = formatRate(tot.rx||0);
-        document.getElementById('bwSubs').textContent = Object.keys(items).length;
-
-        tbody.innerHTML='';
-        Object.keys(items).sort().forEach(sub=>{
-          const v=items[sub]||{};
-          const tr=document.createElement('tr');
-          tr.innerHTML = `<td>${escapeHtml(sub)}</td><td>${formatRate(v.tx||0)}</td><td>${formatRate(v.rx||0)}</td>`;
-          tbody.appendChild(tr);
-        });
+        lastBandwidth = {
+          items: msg.items || {},
+          total: msg.total || {tx:0, rx:0},
+        };
+        renderBandwidthTable(lastBandwidth);
       }else if(['register','unregister','assigned','refresh'].includes(msg.kind)){
         loadSnapshot();
+        loadTokenMeta().catch(()=>{});
       }else if(msg.kind==='snapshot_logs'){
         const pre=document.getElementById('logs'); pre.textContent = (msg.lines||[]).join("\\n");
         pre.scrollTop = pre.scrollHeight;
@@ -2248,6 +2377,15 @@ function connectWS(){
     }catch(e){}
   };
   ws.onclose = ()=> setTimeout(connectWS, 2000);
+}
+function startAutoRefresh(){
+  if(autoRefreshHandle){
+    clearInterval(autoRefreshHandle);
+  }
+  autoRefreshHandle = setInterval(()=>{
+    loadSnapshot().catch(()=>{});
+    loadTokenMeta().catch(()=>{});
+  }, 5000);
 }
 
 /* ===== 집계/제한 모달 ===== */
@@ -2455,113 +2593,13 @@ function openScheduleModal(sub, currentItems){
 }
 
 /* 접속 IP 모달 */
-async function openClientsModal(sub){
-  const fetchData = ()=> api(`/api/admin/clients/${encodeURIComponent(sub)}?days=30`);
-  let data = await fetchData();
-
-  const renderIpRow = (ip, blocked=false)=>`
-    <div class="ip-row">
-      <div class="ip-actions">
-        <span class="badge ipbtn" data-ip="${escapeHtml(ip)}" title="세션 보기">${escapeHtml(ip)}</span>
-        <span class="subtle">세션 기록 보기</span>
-      </div>
-      <div class="ip-actions">
-        ${blocked
-          ? `<button class="btn btn-secondary btn-mini unblock-btn" data-ip="${escapeHtml(ip)}">차단 해제</button>`
-          : `<button class="btn btn-danger btn-mini block-btn" data-ip="${escapeHtml(ip)}">즉시 차단</button>`
-        }
-      </div>
-    </div>`;
-
-  const renderModal = (d)=>{
-    const cur = (d&&d.current_ips)||[];
-    const hist = (d&&d.history)||[];
-    const blocked = (d&&d.blocked_ips)||[];
-    return `<div class="section-stack">
-      <section class="panel" style="box-shadow:none">
-        <div class="panel-head">
-          <div>
-            <h3>현재 접속 중 IP</h3>
-            <p>차단하면 해당 IP의 현재 TCP/UDP 연결을 즉시 종료합니다.</p>
-          </div>
-        </div>
-        <div>${cur.length ? cur.map(ip=>renderIpRow(ip, blocked.includes(ip))).join('') : '<span class="subtle">현재 접속 중인 IP가 없습니다.</span>'}</div>
-      </section>
-      <section class="panel" style="box-shadow:none">
-        <div class="panel-head">
-          <div>
-            <h3>최근 접속 히스토리</h3>
-            <p>일자별로 최근 접속한 IP를 확인하고 필요 시 바로 차단합니다.</p>
-          </div>
-        </div>
-        <div class="section-stack">${
-          hist.length ? hist.map(r=>{
-            const rows = (r.items||[]).map(it=>renderIpRow(it.ip, blocked.includes(it.ip))).join('');
-            return `<div><div class="subtle" style="margin-bottom:8px">${escapeHtml(r.date)}</div>${rows || '<span class="subtle">기록 없음</span>'}</div>`;
-          }).join('') : '<span class="subtle">데이터가 없습니다.</span>'
-        }</div>
-      </section>
-      <section class="panel" style="box-shadow:none">
-        <div class="panel-head">
-          <div>
-            <h3>현재 차단 목록</h3>
-            <p>이 터널에만 적용되는 개별 IP 차단 목록입니다.</p>
-          </div>
-        </div>
-        <div>${blocked.length ? blocked.map(ip=>renderIpRow(ip, true)).join('') : '<span class="subtle">차단된 IP가 없습니다.</span>'}</div>
-      </section>
-    </div>`;
-  };
-
-  const bindActions = ()=>{
-    const body = document.getElementById('modalBody');
-    body.querySelectorAll('.ipbtn').forEach(el=>{
-      el.onclick = ()=> jumpFromModal(()=> openIpSessions(sub, el.getAttribute('data-ip')));
-    });
-    body.querySelectorAll('.block-btn').forEach(el=>{
-      el.onclick = async ()=>{
-        const ip = el.getAttribute('data-ip');
-        if(!window.confirm(`${ip} 를 차단하고 현재 연결을 즉시 끊을까요?`)) return;
-        try{
-          await api(`/api/admin/clients/${encodeURIComponent(sub)}/block-ip`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({ip}),
-          });
-          data = await fetchData();
-          document.getElementById('modalBody').innerHTML = renderModal(data);
-          bindActions();
-          await loadSnapshot();
-          showToast(`${ip} 를 차단했습니다.`,'ok');
-        }catch(err){
-          showToast(`IP 차단 실패: ${err.message}`,'err',2800);
-        }
-      };
-    });
-    body.querySelectorAll('.unblock-btn').forEach(el=>{
-      el.onclick = async ()=>{
-        const ip = el.getAttribute('data-ip');
-        try{
-          await api(`/api/admin/clients/${encodeURIComponent(sub)}/unblock-ip`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({ip}),
-          });
-          data = await fetchData();
-          document.getElementById('modalBody').innerHTML = renderModal(data);
-          bindActions();
-          await loadSnapshot();
-          showToast(`${ip} 차단을 해제했습니다.`,'ok');
-        }catch(err){
-          showToast(`차단 해제 실패: ${err.message}`,'err',2800);
-        }
-      };
-    });
-  };
-
-  const p = openCustomModal(`접속 IP (${sub})`, renderModal(data), '닫기');
-  bindActions();
-  await p;
+async function setTunnelIpBlockState(sub, ip, blocked){
+  const path = blocked ? 'block-ip' : 'unblock-ip';
+  return api(`/api/admin/clients/${encodeURIComponent(sub)}/${path}`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ip}),
+  });
 }
 
 function fmtDuration(ms){
@@ -2573,26 +2611,411 @@ function fmtDuration(ms){
   return `${pad(mm)}:${pad(ss)}`;
 }
 
+async function openHistoryDetailModal(sub, opts={}){
+  const state = {
+    date: opts.date || '',
+    search: opts.search || '',
+    page: 1,
+    pageSize: 8,
+    days: opts.days || 90,
+  };
+  const fetchData = async ()=>{
+    const qs = new URLSearchParams({
+      days: String(state.days),
+      page: String(state.page),
+      page_size: String(state.pageSize),
+    });
+    if(state.date) qs.set('date', state.date);
+    if(state.search) qs.set('search', state.search);
+    return api(`/api/admin/clients/${encodeURIComponent(sub)}/history?${qs.toString()}`);
+  };
+  let data = await fetchData();
+
+  const renderModal = (d)=>{
+    const items = d.items || [];
+    return `
+      <div class="modal-stack">
+        <section class="panel" style="box-shadow:none">
+          <div class="panel-head">
+            <div>
+              <h3>${state.date ? escapeHtml(state.date) : '최근 접속 검색 결과'}</h3>
+              <p>${state.date ? '선택한 날짜의 접속 IP를 페이지 단위로 확인합니다.' : '최근 접속 기록에서 IP를 검색합니다.'}</p>
+            </div>
+          </div>
+          <div class="search-inline">
+            <input id="historyDetailSearch" placeholder="IP 검색" value="${escapeHtml(state.search)}"/>
+            <button class="btn btn-secondary btn-mini" id="historyDetailSearchBtn">검색</button>
+          </div>
+          <div class="list-stack" style="margin-top:14px">
+            ${items.length ? items.map(item=>`
+              <div class="mapping-row">
+                <div class="mapping-meta">
+                  <strong>${escapeHtml(item.ip)}</strong>
+                  <span>${escapeHtml(item.date)} · 기록 ${escapeHtml(item.count||0)}회 · 최근 ${escapeHtml(item.last_seen || '-')}</span>
+                </div>
+                <div class="ip-actions">
+                  <button class="btn btn-ghost btn-mini history-session-btn" data-ip="${escapeHtml(item.ip)}">세션 상세</button>
+                  <button class="btn ${(lastSnapshot && lastSnapshot.tunnels && lastSnapshot.tunnels[sub] && (lastSnapshot.tunnels[sub].blocked_ips||[]).includes(item.ip)) ? 'btn-secondary history-unblock-btn' : 'btn-danger history-block-btn'} btn-mini" data-ip="${escapeHtml(item.ip)}">
+                    ${(lastSnapshot && lastSnapshot.tunnels && lastSnapshot.tunnels[sub] && (lastSnapshot.tunnels[sub].blocked_ips||[]).includes(item.ip)) ? '차단 해제' : '즉시 차단'}
+                  </button>
+                </div>
+              </div>
+            `).join('') : '<div class="empty-state">조건에 맞는 접속 기록이 없습니다.</div>'}
+          </div>
+          ${renderPager(d.page || 1, d.pages || 1)}
+        </section>
+      </div>`;
+  };
+
+  const bindActions = ()=>{
+    const body = document.getElementById('modalBody');
+    const searchBtn = body.querySelector('#historyDetailSearchBtn');
+    const searchInput = body.querySelector('#historyDetailSearch');
+    if(searchBtn){
+      searchBtn.onclick = async ()=>{
+        state.search = (searchInput.value || '').trim();
+        state.page = 1;
+        data = await fetchData();
+        body.innerHTML = renderModal(data);
+        bindActions();
+      };
+    }
+    body.querySelectorAll('[data-page-nav]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const dir = btn.getAttribute('data-page-nav');
+        const nextPage = dir === 'prev' ? Math.max(1, (data.page||1) - 1) : Math.min(data.pages||1, (data.page||1) + 1);
+        if(nextPage === state.page) return;
+        state.page = nextPage;
+        data = await fetchData();
+        body.innerHTML = renderModal(data);
+        bindActions();
+      };
+    });
+    body.querySelectorAll('.history-session-btn').forEach(btn=>{
+      btn.onclick = ()=> jumpFromModal(()=> openIpSessions(sub, btn.getAttribute('data-ip')));
+    });
+    body.querySelectorAll('.history-block-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        const ok = await confirmAsync(`${escapeHtml(ip)} 를 차단하고 현재 연결을 즉시 종료할까요?`);
+        if(!ok) return;
+        try{
+          await setTunnelIpBlockState(sub, ip, true);
+          await loadSnapshot();
+          data = await fetchData();
+          body.innerHTML = renderModal(data);
+          bindActions();
+          showToast(`${ip} 를 차단했습니다.`,'ok');
+        }catch(err){
+          showToast(`IP 차단 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+    body.querySelectorAll('.history-unblock-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        try{
+          await setTunnelIpBlockState(sub, ip, false);
+          await loadSnapshot();
+          data = await fetchData();
+          body.innerHTML = renderModal(data);
+          bindActions();
+          showToast(`${ip} 차단을 해제했습니다.`,'ok');
+        }catch(err){
+          showToast(`차단 해제 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+  };
+
+  const title = state.date ? `접속 기록 (${sub} / ${state.date})` : `접속 기록 검색 (${sub})`;
+  const p = openCustomModal(title, renderModal(data), '닫기');
+  bindActions();
+  await p;
+}
+
+async function openClientsModal(sub){
+  const fetchData = ()=> api(`/api/admin/clients/${encodeURIComponent(sub)}?days=90`);
+  let data = await fetchData();
+  const state = {blockedPage:1, blockedQuery:''};
+
+  const monthKeys = ()=>{
+    const keys = Array.from(new Set((data.history_dates||[]).map(item=> String(item.date || '').slice(0, 7)).filter(Boolean))).sort().reverse();
+    return keys.length ? keys : [monthKeyFromDate(new Date())];
+  };
+  let currentMonth = monthKeys()[0];
+
+  const renderCurrentRow = (ip, blocked)=>`
+    <div class="mapping-row">
+      <div class="mapping-meta">
+        <strong>${escapeHtml(ip)}</strong>
+        <span>현재 이 터널에 연결 중인 IP</span>
+      </div>
+      <div class="ip-actions">
+        <button class="btn btn-ghost btn-mini current-session-btn" data-ip="${escapeHtml(ip)}">세션 상세</button>
+        ${blocked
+          ? `<button class="btn btn-secondary btn-mini current-unblock-btn" data-ip="${escapeHtml(ip)}">차단 해제</button>`
+          : `<button class="btn btn-danger btn-mini current-block-btn" data-ip="${escapeHtml(ip)}">즉시 차단</button>`
+        }
+      </div>
+    </div>`;
+
+  const renderCalendar = ()=>{
+    const entries = (data.history_dates || []).slice().sort((a,b)=> String(b.date).localeCompare(String(a.date)));
+    const availableMonths = monthKeys();
+    if(!availableMonths.includes(currentMonth)){
+      currentMonth = availableMonths[0];
+    }
+    const dayMap = Object.fromEntries(entries.map(item=> [item.date, item.count || 0]));
+    const base = parseMonthKey(currentMonth);
+    const year = base.getFullYear();
+    const month = base.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const totalDays = new Date(year, month + 1, 0).getDate();
+    const cells = [];
+    for(let idx=0; idx<firstDay.getDay(); idx+=1){
+      cells.push('<div class="calendar-empty"></div>');
+    }
+    for(let day=1; day<=totalDays; day+=1){
+      const dateKey = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      const count = Number(dayMap[dateKey] || 0);
+      if(count > 0){
+        cells.push(`
+          <div class="calendar-cell">
+            <button class="calendar-day has-data history-date-btn" data-date="${dateKey}">
+              <span>${day}</span>
+              <span class="count">${count} IP</span>
+            </button>
+          </div>`);
+      }else{
+        cells.push(`
+          <div class="calendar-cell">
+            <div class="calendar-day disabled">
+              <span>${day}</span>
+              <span class="subtle">기록 없음</span>
+            </div>
+          </div>`);
+      }
+    }
+    while(cells.length % 7){
+      cells.push('<div class="calendar-empty"></div>');
+    }
+    const monthIndex = availableMonths.indexOf(currentMonth);
+    return `
+      <div class="calendar-shell">
+        <div class="calendar-head">
+          <div class="session-meta">
+            <span class="pill">${formatMonthLabel(currentMonth)}</span>
+            <span class="pill">기록 일수 ${(data.history_dates||[]).length}</span>
+          </div>
+          <div class="ip-actions">
+            <button class="btn btn-ghost btn-mini month-nav-btn" data-month-nav="prev" ${monthIndex >= availableMonths.length - 1 ? 'disabled' : ''}>이전 달</button>
+            <button class="btn btn-ghost btn-mini month-nav-btn" data-month-nav="next" ${monthIndex <= 0 ? 'disabled' : ''}>다음 달</button>
+          </div>
+        </div>
+        <div class="calendar-grid">
+          <div class="calendar-weekday">Sun</div>
+          <div class="calendar-weekday">Mon</div>
+          <div class="calendar-weekday">Tue</div>
+          <div class="calendar-weekday">Wed</div>
+          <div class="calendar-weekday">Thu</div>
+          <div class="calendar-weekday">Fri</div>
+          <div class="calendar-weekday">Sat</div>
+          ${cells.join('')}
+        </div>
+      </div>`;
+  };
+
+  const renderBlockedList = ()=>{
+    const blocked = (data.blocked_ips || []).slice().sort();
+    const filtered = blocked.filter(ip=> !state.blockedQuery || ip.toLowerCase().includes(state.blockedQuery.toLowerCase()));
+    const pageSize = 6;
+    const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    const page = Math.max(1, Math.min(pages, state.blockedPage));
+    state.blockedPage = page;
+    const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+    return `
+      <div class="search-inline" style="margin-bottom:14px">
+        <input id="blockedSearch" placeholder="차단 IP 검색" value="${escapeHtml(state.blockedQuery)}"/>
+        <button class="btn btn-secondary btn-mini" id="blockedSearchBtn">검색</button>
+      </div>
+      <div class="list-stack">
+        ${pageItems.length ? pageItems.map(ip=>`
+          <div class="mapping-row">
+            <div class="mapping-meta">
+              <strong>${escapeHtml(ip)}</strong>
+              <span>이 터널 전용 차단 규칙</span>
+            </div>
+            <div class="ip-actions">
+              <button class="btn btn-ghost btn-mini blocked-session-btn" data-ip="${escapeHtml(ip)}">세션 상세</button>
+              <button class="btn btn-secondary btn-mini blocked-unblock-btn" data-ip="${escapeHtml(ip)}">차단 해제</button>
+            </div>
+          </div>
+        `).join('') : '<div class="empty-state">차단된 IP가 없습니다.</div>'}
+      </div>
+      ${renderPager(page, pages)}`;
+  };
+
+  const renderModal = ()=>{
+    const currentIps = data.current_ips || [];
+    const blockedIps = new Set(data.blocked_ips || []);
+    return `<div class="section-stack">
+      <section class="panel" style="box-shadow:none">
+        <div class="panel-head">
+          <div>
+            <h3>현재 접속 중 IP</h3>
+            <p>차단하면 해당 IP의 현재 TCP/UDP 연결을 즉시 종료합니다.</p>
+          </div>
+        </div>
+        <div class="list-stack">${currentIps.length ? currentIps.map(ip=> renderCurrentRow(ip, blockedIps.has(ip))).join('') : '<div class="empty-state">현재 접속 중인 IP가 없습니다.</div>'}</div>
+      </section>
+      <section class="panel" style="box-shadow:none">
+        <div class="panel-head">
+          <div>
+            <h3>최근 접속 히스토리</h3>
+            <p>날짜를 선택하면 해당 날짜의 접속 IP 목록을 별도 모달에서 페이지 단위로 확인합니다.</p>
+          </div>
+        </div>
+        <div class="search-inline" style="margin-bottom:14px">
+          <input id="historySearch" placeholder="최근 접속 IP 검색" value=""/>
+          <button class="btn btn-secondary btn-mini" id="historySearchBtn">검색</button>
+        </div>
+        ${(data.history_dates||[]).length ? renderCalendar() : '<div class="empty-state">최근 접속 히스토리가 없습니다.</div>'}
+      </section>
+      <section class="panel" style="box-shadow:none">
+        <div class="panel-head">
+          <div>
+            <h3>현재 차단 목록</h3>
+            <p>검색과 페이지 이동으로 길어진 차단 목록을 정리해서 확인합니다.</p>
+          </div>
+        </div>
+        ${renderBlockedList()}
+      </section>
+    </div>`;
+  };
+
+  const rerender = ()=>{
+    document.getElementById('modalBody').innerHTML = renderModal();
+    bindActions();
+  };
+
+  const bindActions = ()=>{
+    const body = document.getElementById('modalBody');
+    body.querySelectorAll('.current-session-btn,.blocked-session-btn').forEach(btn=>{
+      btn.onclick = ()=> jumpFromModal(()=> openIpSessions(sub, btn.getAttribute('data-ip')));
+    });
+    body.querySelectorAll('.current-block-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        const ok = await confirmAsync(`${escapeHtml(ip)} 를 차단하고 현재 연결을 즉시 종료할까요?`);
+        if(!ok) return;
+        try{
+          await setTunnelIpBlockState(sub, ip, true);
+          await loadSnapshot();
+          data = await fetchData();
+          rerender();
+          showToast(`${ip} 를 차단했습니다.`,'ok');
+        }catch(err){
+          showToast(`IP 차단 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+    body.querySelectorAll('.current-unblock-btn,.blocked-unblock-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const ip = btn.getAttribute('data-ip');
+        try{
+          await setTunnelIpBlockState(sub, ip, false);
+          await loadSnapshot();
+          data = await fetchData();
+          rerender();
+          showToast(`${ip} 차단을 해제했습니다.`,'ok');
+        }catch(err){
+          showToast(`차단 해제 실패: ${err.message}`,'err',2800);
+        }
+      };
+    });
+    body.querySelectorAll('.history-date-btn').forEach(btn=>{
+      btn.onclick = ()=> jumpFromModal(()=> openHistoryDetailModal(sub, {date: btn.getAttribute('data-date')}));
+    });
+    body.querySelectorAll('.month-nav-btn').forEach(btn=>{
+      btn.onclick = ()=>{
+        const months = monthKeys();
+        const idx = months.indexOf(currentMonth);
+        if(btn.getAttribute('data-month-nav') === 'prev'){
+          currentMonth = months[Math.min(months.length - 1, idx + 1)] || currentMonth;
+        }else{
+          currentMonth = months[Math.max(0, idx - 1)] || currentMonth;
+        }
+        rerender();
+      };
+    });
+    const historySearchBtn = body.querySelector('#historySearchBtn');
+    if(historySearchBtn){
+      historySearchBtn.onclick = ()=>{
+        const value = (body.querySelector('#historySearch').value || '').trim();
+        if(!value){
+          showToast('검색할 IP를 입력하세요.','warn');
+          return;
+        }
+        jumpFromModal(()=> openHistoryDetailModal(sub, {search:value}));
+      };
+    }
+    const blockedSearchBtn = body.querySelector('#blockedSearchBtn');
+    if(blockedSearchBtn){
+      blockedSearchBtn.onclick = ()=>{
+        state.blockedQuery = (body.querySelector('#blockedSearch').value || '').trim();
+        state.blockedPage = 1;
+        rerender();
+      };
+    }
+    body.querySelectorAll('[data-page-nav]').forEach(btn=>{
+      btn.onclick = ()=>{
+        const dir = btn.getAttribute('data-page-nav');
+        const blocked = (data.blocked_ips || []).filter(ip=> !state.blockedQuery || ip.toLowerCase().includes(state.blockedQuery.toLowerCase()));
+        const pages = Math.max(1, Math.ceil(blocked.length / 6));
+        state.blockedPage = dir === 'prev' ? Math.max(1, state.blockedPage - 1) : Math.min(pages, state.blockedPage + 1);
+        rerender();
+      };
+    });
+  };
+
+  const p = openCustomModal(`접속 IP (${sub})`, renderModal(), '닫기');
+  bindActions();
+  await p;
+}
+
 async function openIpSessions(sub, ip){
-  const days = 30;
+  const days = 90;
   const d = await api(`/api/admin/clients/${encodeURIComponent(sub)}/sessions?ip=${encodeURIComponent(ip)}&days=${days}`);
   const rows = [];
   (d.sessions||[]).forEach(day=>{
     (day.items||[]).forEach(sess=>{
-      rows.push({date:day.date, start:sess.start||'', end:sess.end||''});
+      rows.push({
+        date: day.date,
+        start: sess.start || '',
+        end: sess.end || '',
+        proto: String(sess.proto || '').toUpperCase(),
+        mapping: sess.mapping || '',
+        remotePort: sess.remote_port || '',
+      });
     });
   });
-  rows.sort((a,b)=> (a.date+a.start).localeCompare(b.date+b.start));
+  rows.sort((a,b)=> (b.date+b.start).localeCompare(a.date+a.start));
 
   const now = new Date();
   const tr = rows.map(r=>{
-    const st = r.start? new Date(r.start) : null;
-    const en = r.end? new Date(r.end) : null;
-    const dur = (st && en)? (en - st) : (st? (now - st) : null);
-    const td = (x)=> `<td style="padding:10px 12px">${x||'-'}</td>`;
+    const st = r.start ? new Date(r.start) : null;
+    const en = r.end ? new Date(r.end) : null;
+    const dur = (st && en) ? (en - st) : (st ? (now - st) : null);
+    const td = (x, align='left')=> `<td style="padding:10px 12px;text-align:${align}">${x || '-'}</td>`;
+    const mapping = [r.proto, r.mapping].filter(Boolean).join(' / ') || '-';
     return `<tr>
-      ${td(r.date)}${td(r.start? r.start.replace('T',' ').replace('Z',' UTC') : '')}${td(r.end? r.end.replace('T',' ').replace('Z',' UTC') : '')}
-      <td style="padding:10px 12px;text-align:right">${fmtDuration(dur)}</td>
+      ${td(r.date)}
+      ${td(r.start ? r.start.replace('T',' ').replace('Z',' UTC') : '')}
+      ${td(r.end ? r.end.replace('T',' ').replace('Z',' UTC') : '')}
+      ${td(mapping)}
+      ${td(r.remotePort ? String(r.remotePort) : '-')}
+      ${td(fmtDuration(dur), 'right')}
     </tr>`;
   }).join('');
 
@@ -2601,9 +3024,9 @@ async function openIpSessions(sub, ip){
     <div class="overflow-x-auto">
       <table class="bw-table">
         <thead>
-          <tr><th>날짜(UTC)</th><th>접속시간</th><th>나간시간</th><th style="text-align:right">지속</th></tr>
+          <tr><th>날짜(UTC)</th><th>접속시간</th><th>나간시간</th><th>포트 매핑</th><th>원격 포트</th><th style="text-align:right">지속</th></tr>
         </thead>
-        <tbody>${tr || `<tr><td colspan="4" style="padding:10px 12px"><span class="subtle">세션이 없습니다.</span></td></tr>`}</tbody>
+        <tbody>${tr || `<tr><td colspan="6" style="padding:10px 12px"><span class="subtle">세션이 없습니다.</span></td></tr>`}</tbody>
       </table>
     </div>
   </div>`;
@@ -2706,7 +3129,8 @@ async function openPortManageModal(sub){
       btn.onclick = async ()=>{
         const proto = btn.getAttribute('data-proto');
         const name = btn.getAttribute('data-name');
-        if(!window.confirm(`${name} ${proto.toUpperCase()} 포트를 삭제할까요? 현재 연결된 클라이언트에도 즉시 제거 명령을 보냅니다.`)) return;
+        const ok = await confirmAsync(`${escapeHtml(name)} ${proto.toUpperCase()} 포트를 삭제할까요?<br><br>현재 연결된 클라이언트에도 즉시 제거 명령을 보냅니다.`);
+        if(!ok) return;
         try{
           const result = await api(`/api/tunnels/${encodeURIComponent(sub)}/mappings/${encodeURIComponent(proto)}/${encodeURIComponent(name)}`, {
             method:'DELETE',
@@ -2847,10 +3271,12 @@ document.getElementById('clearLog').onclick = async ()=>{
 
 /* 초기 로드 */
 switchSection('overviewSection');
+renderBandwidthTable();
 loadSnapshot();
 loadLogList();
 loadTokenMeta();
 connectWS();
+startAutoRefresh();
 </script>
 </body></html>
 """
@@ -3167,31 +3593,92 @@ async def api_limits_set(request: web.Request) -> web.Response:
     return web.json_response({"ok":True,"sub":sub,"limits":STATE["per_tunnel_limits"][sub]})
 
 # ===== 접속 IP / 세션 조회 =====
+def _history_day_keys(sub: str, days: int) -> List[str]:
+    hist_map = IP_HISTORY.get(sub, {})
+    keys = sorted(hist_map.keys())
+    if days and keys:
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        keys = [key for key in keys if key >= cutoff]
+    return keys
+
+
+def _paginate_rows(items: List[Any], page: int, page_size: int) -> Tuple[List[Any], int, int, int]:
+    total = len(items)
+    page_size = max(1, min(100, int(page_size or 20)))
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(pages, int(page or 1)))
+    start = (page - 1) * page_size
+    return items[start:start + page_size], total, pages, page
+
+
 @require_admin
 async def api_clients(request: web.Request) -> web.Response:
     sub = request.match_info["sub"]
     days = max(1, min(365, int(request.query.get("days","30"))))
     current_ips = _current_ips_for(sub)
     hist_map = IP_HISTORY.get(sub, {})
-    time_map = IP_TIMES.get(sub, {})
-    keys = sorted(hist_map.keys())
-    if days and keys:
-        cutoff = (datetime.datetime.now() - datetime.timedelta(days=days-1)).strftime("%Y-%m-%d")
-        keys = [k for k in keys if k >= cutoff]
-    history = []
-    for day in keys:
-        ips = sorted(hist_map.get(day, []))
-        items = []
-        for ip in ips:
-            times = (time_map.get(day, {}).get(ip, []) or [])
-            items.append({"ip": ip, "times": times})
-        history.append({"date": day, "items": items})
+    history_dates = [
+        {"date": day, "count": len(hist_map.get(day, []) or [])}
+        for day in _history_day_keys(sub, days)
+    ]
     return web.json_response({
         "ok":True,
         "sub":sub,
         "current_ips": current_ips,
-        "history": history,
-        "blocked_ips": ((STATE.get("per_tunnel_ip_deny") or {}).get(sub, []) or []),
+        "history_dates": history_dates,
+        "blocked_ips": sorted(((STATE.get("per_tunnel_ip_deny") or {}).get(sub, []) or [])),
+    })
+
+@require_admin
+async def api_client_history(request: web.Request) -> web.Response:
+    sub = request.match_info["sub"]
+    date = (request.query.get("date") or "").strip()
+    search = (request.query.get("search") or "").strip().lower()
+    days = max(1, min(365, int(request.query.get("days", "30"))))
+    page = int(request.query.get("page", "1"))
+    page_size = int(request.query.get("page_size", "12"))
+    hist_map = IP_HISTORY.get(sub, {})
+    time_map = IP_TIMES.get(sub, {})
+
+    if date:
+        rows = []
+        for ip in sorted(hist_map.get(date, []) or []):
+            if search and search not in ip.lower():
+                continue
+            times = (time_map.get(date, {}).get(ip, []) or [])
+            rows.append({
+                "date": date,
+                "ip": ip,
+                "times": times,
+                "count": len(times),
+                "last_seen": times[-1] if times else "",
+            })
+    else:
+        rows = []
+        for day in reversed(_history_day_keys(sub, days)):
+            for ip in sorted(hist_map.get(day, []) or []):
+                if search and search not in ip.lower():
+                    continue
+                times = (time_map.get(day, {}).get(ip, []) or [])
+                rows.append({
+                    "date": day,
+                    "ip": ip,
+                    "times": times,
+                    "count": len(times),
+                    "last_seen": times[-1] if times else "",
+                })
+
+    page_items, total, pages, page = _paginate_rows(rows, page, page_size)
+    return web.json_response({
+        "ok": True,
+        "sub": sub,
+        "date": date or None,
+        "search": search,
+        "items": page_items,
+        "total": total,
+        "pages": pages,
+        "page": page,
+        "page_size": page_size,
     })
 
 @require_admin
@@ -3204,8 +3691,8 @@ async def api_ip_sessions(request: web.Request) -> web.Response:
     ses = SESSIONS.get(sub, {})
     keys = sorted(ses.keys())
     if days and keys:
-        cutoff = (datetime.datetime.now() - datetime.timedelta(days=days-1)).strftime("%Y-%m-%d")
-        keys = [k for k in keys if k >= cutoff]
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        keys = [key for key in keys if key >= cutoff]
     out=[]
     for day in keys:
         items = ses.get(day, {}).get(ip, [])
@@ -3407,7 +3894,6 @@ async def bw_loop():
         _save_ip_times_if_needed()
         _save_sessions_if_needed()
 
-        if not items and (total["tx"]==0 and total["rx"]==0): continue
         payload = {"kind":"bandwidth","ts": time.time(), "items": items, "total": total}
         broadcast(payload)
 
@@ -3449,6 +3935,7 @@ async def make_app() -> web.Application:
 
         # 접속 IP / 세션
         web.get ("/api/admin/clients/{sub}", api_clients),
+        web.get ("/api/admin/clients/{sub}/history", api_client_history),
         web.get ("/api/admin/clients/{sub}/sessions", api_ip_sessions),
         web.post("/api/admin/clients/{sub}/block-ip", api_client_block_ip),
         web.post("/api/admin/clients/{sub}/unblock-ip", api_client_unblock_ip),

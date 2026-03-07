@@ -74,3 +74,29 @@ EOF
 echo "[정보] 설정을 반영하여 서비스를 재시작합니다..."
 systemctl restart tunneler-client
 echo "[OK] 매핑 완료! 대시보드를 확인하세요."
+
+SCHEME="$(echo "${WS_URL}" | sed -E 's#^(ws|wss)://.*#\1#')"
+HOSTPORT="$(echo "${WS_URL}" | sed -E 's#^(ws|wss)://##' | cut -d'/' -f1)"
+[[ "$SCHEME" == "wss" ]] && BASE="https://${HOSTPORT}" || BASE="http://${HOSTPORT}"
+
+if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    echo
+    echo "=== 서버에서 배정된 원격 포트 ==="
+    set +e
+    TOKEN_ENC="$(jq -rn --arg v "$TOKEN" '$v|@uri')"
+    HEALTH_JSON="$(curl -ksS --max-time 5 "${BASE}/_health?token=${TOKEN_ENC}")"
+    if [[ $? -eq 0 && -n "$HEALTH_JSON" ]]; then
+        echo "$HEALTH_JSON" | jq -r --arg sd "$SUBDOMAIN" '
+          .tunnels[$sd] as $t
+          | if $t == null then
+              "  (서브도메인 없음: 연결/토큰/WS URL 확인)"
+            else
+              "  TCP: " + ( ($t.tcp // {}) | to_entries | map(.key + "=" + (.value|tostring)) | join(", ") )
+              + "\n  UDP: " + ( ($t.udp // {}) | to_entries | map(.key + "=" + (.value|tostring)) | join(", ") )
+            end
+        '
+    else
+        echo "(헬스 조회 실패: 토큰 또는 연결 상태를 확인하세요)"
+    fi
+    set -e
+fi

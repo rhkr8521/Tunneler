@@ -114,7 +114,7 @@
     -   **대시보드 접속**: `http(s)://<도메인>/dashboard`
     -   **서비스 상태**: `sudo systemctl status tunneler-server -l`
     -   **실시간 로그**: `sudo journalctl -u tunneler-server -f`
-    -   **헬스 체크**: `curl -fsS http://<도메인>/_health | jq .`
+    -   **헬스 체크**: `curl -fsS "http://<도메인>/_health?token=<CLIENT_TOKEN>" | jq .`
 
 ### 2. 클라이언트 설치
 

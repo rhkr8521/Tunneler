@@ -270,7 +270,7 @@ fi
 
 # 헬스 체크
 echo "[CHECK] 백엔드 헬스 확인..."
-if curl -fsS "http://${DOMAIN}/_health" >/dev/null 2>&1; then
+if curl -fsS "http://${DOMAIN}/login" >/dev/null 2>&1; then
   echo "[OK] 백엔드 응답 정상"
 else
   echo "[WARN] 백엔드 200 응답 없음. 다음을 확인하세요:"
