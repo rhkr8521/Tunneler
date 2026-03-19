@@ -61,6 +61,11 @@
    │  ├─ requirements.txt
    │  ├─ install_client_ubuntu.sh
    │  └─ uninstall_client_ubuntu.sh
+   ├─ linux-arch/
+   │  ├─ client.py
+   │  ├─ requirements.txt
+   │  ├─ install_client_arch_linux.sh
+   │  └─ uninstall_client_arch_linux.sh
    ├─ mac/
    │  ├─ client.py
    │  ├─ requirements.txt
@@ -83,7 +88,7 @@
     -   Python 3.10+, Nginx (스크립트에서 자동 설치)
     -   도메인 및 DNS 설정 (와일드카드 서브도메인 사용 시 `*.example.com` 필요)
 -   **클라이언트**
-    -   Ubuntu/Debian, macOS, Windows 10+
+    -   Ubuntu/Debian, Linux/Arch, macOS, Windows 10+
     -   Python 3.10+ (OS별 설치 스크립트가 가상환경을 자동으로 구성)
 
 ### 1. 서버 설치 (Ubuntu/Debian)
@@ -139,6 +144,15 @@
     sudo apt install tunneler-client
     ```
 3.  **상태 확인**: `systemctl --user status tunneler-client -l`
+
+#### Linux(Arch)
+
+1.  `client.py`, `requirements.txt`, `install_client_arch_linux.sh` 파일을 준비합니다.
+2.  스크립트를 실행합니다.
+    ```bash
+    bash install_client_arch_linux.sh
+    ```
+3.  **상태 확인**: `systemctl status tunneler-client.service -l`
 
 #### macOS
 
@@ -213,6 +227,7 @@
 
 -   **Ubuntu/Debian Server**: `sudo apt purge tunneler-server` 명령어를 실행합니다.
 -   **Ubuntu/Debian Client**: `sudo apt purge tunneler-client` 명령어를 실행합니다.
+-   **Linux/Arch Client**: `bash uninstall_client_arch_linux.sh` 스크립트를 실행합니다.
 -   **macOS Client**: `bash uninstall_client_mac.sh` 스크립트를 실행합니다.
 -   **Windows Client**: `uninstall_client_windows.ps1` 스크립트를 **관리자 권한으로 실행** 합니다.
 
