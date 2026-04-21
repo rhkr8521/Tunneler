@@ -83,8 +83,7 @@ if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     echo
     echo "=== 서버에서 배정된 원격 포트 ==="
     set +e
-    TOKEN_ENC="$(jq -rn --arg v "$TOKEN" '$v|@uri')"
-    HEALTH_JSON="$(curl -ksS --max-time 5 "${BASE}/_health?token=${TOKEN_ENC}")"
+    HEALTH_JSON="$(curl -ksS --max-time 5 -H "Authorization: Bearer ${TOKEN}" "${BASE}/_health")"
     if [[ $? -eq 0 && -n "$HEALTH_JSON" ]]; then
         echo "$HEALTH_JSON" | jq -r --arg sd "$SUBDOMAIN" '
           .tunnels[$sd] as $t

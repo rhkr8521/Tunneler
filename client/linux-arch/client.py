@@ -110,6 +110,33 @@ def normalize_mapping_payload(raw: dict) -> Optional[dict]:
     return {"name": name, "host": host, "port": port, "remote_port": remote_port}
 
 
+def registration_issue_message(issue: str) -> str:
+    messages = {
+        "missing_name": "이름이 비어 있습니다.",
+        "invalid_name": "이름은 영문/숫자/밑줄만 사용할 수 있고 숫자로 시작할 수 없습니다.",
+        "duplicate_name": "같은 이름이 중복되어 있습니다.",
+    }
+    return messages.get(issue, issue or "알 수 없는 오류")
+
+
+def print_registration_failure(payload: dict):
+    reason = str(payload.get("reason") or "register_failed")
+    message = str(payload.get("message") or reason)
+    if message and message != reason:
+        print(f"[ERR] register failed: {message} ({reason})")
+    else:
+        print(f"[ERR] register failed: {reason}")
+    details = payload.get("details") or {}
+    if "subdomain" in details:
+        subdomain = str(details.get("subdomain") or "").strip() or "(empty)"
+        print(f"  - subdomain: {subdomain}")
+    for proto in ("tcp", "udp"):
+        for item in details.get(proto) or []:
+            name = str(item.get("name") or "").strip() or "(empty)"
+            issue = registration_issue_message(str(item.get("issue") or ""))
+            print(f"  - {proto.upper()} {name}: {issue}")
+
+
 async def cleanup_runtime(
     tcp_streams: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]],
     udp_groups: Tuple[Dict[str, UDPMap], ...],
@@ -277,7 +304,7 @@ async def run_client(
                                         assigned_once = True
                                         print("관리자 대시보드에서 현재 할당 포트를 확인하세요.")
                                 else:
-                                    print(f"[ERR] register failed: {data.get('reason')}")
+                                    print_registration_failure(data)
                                     await asyncio.sleep(3)
                                     break
 

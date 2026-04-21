@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+detect_ui_lang() {
+  local locale="${LC_ALL:-${LANG:-${LANGUAGE:-en}}}"
+  locale="$(printf '%s' "$locale" | tr '[:upper:]' '[:lower:]')"
+  [[ "$locale" == ko* ]] && printf 'ko' || printf 'en'
+}
+UI_LANG="$(detect_ui_lang)"
+trmsg() {
+  if [[ "$UI_LANG" == "ko" ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 if [[ $EUID -ne 0 ]]; then
-  echo "root로 실행하세요."
+  echo "$(trmsg "root로 실행하세요." "Run as root.")"
   exit 1
 fi
 
@@ -30,51 +44,51 @@ while [[ $# -gt 0 ]]; do
     --use-le)    USE_LE="${2:-N}"; shift 2 ;;
     --le-email)  LE_EMAIL="${2:-}"; shift 2 ;;
     *)
-      echo "[오류] 알 수 없는 인자: $1"
+      echo "$(trmsg "[오류] 알 수 없는 인자: $1" "[ERROR] Unknown argument: $1")"
       exit 1
       ;;
   esac
 done
 
 if [[ -z "$DOMAIN" ]]; then
-  echo "[오류] --domain 이 필요합니다"
+  echo "$(trmsg "[오류] --domain 이 필요합니다" "[ERROR] --domain is required")"
   exit 1
 fi
 if [[ -z "$ADMIN_ID" || -z "$ADMIN_PW" ]]; then
-  echo "[오류] --admin-id / --admin-pw 가 필요합니다"
+  echo "$(trmsg "[오류] --admin-id / --admin-pw 가 필요합니다" "[ERROR] --admin-id and --admin-pw are required")"
   exit 1
 fi
 
 # HTTPS 사용 시 이메일 필수 (setup_full.sh는 절대 입력창 띄우지 않음)
 if [[ "${USE_LE^^}" == "Y" && -z "$LE_EMAIL" ]]; then
-  echo "[오류] Let's Encrypt 사용 시 --le-email 이 필요합니다"
+  echo "$(trmsg "[오류] Let's Encrypt 사용 시 --le-email 이 필요합니다" "[ERROR] --le-email is required when Let's Encrypt is enabled")"
   exit 1
 fi
 
 if ! [[ "$APP_PORT" =~ ^[0-9]+$ ]]; then
-  echo "[오류] app-port가 숫자가 아닙니다: $APP_PORT"
+  echo "$(trmsg "[오류] app-port가 숫자가 아닙니다: $APP_PORT" "[ERROR] app-port must be numeric: $APP_PORT")"
   exit 1
 fi
 if ! [[ "$TCP_RANGE" =~ ^[0-9]+-[0-9]+$ ]]; then
-  echo "[오류] tcp-range 형식이 아닙니다(예: 20000-20100): $TCP_RANGE"
+  echo "$(trmsg "[오류] tcp-range 형식이 아닙니다(예: 20000-20100): $TCP_RANGE" "[ERROR] tcp-range must match the form 20000-20100: $TCP_RANGE")"
   exit 1
 fi
 if ! [[ "$UDP_RANGE" =~ ^[0-9]+-[0-9]+$ ]]; then
-  echo "[오류] udp-range 형식이 아닙니다(예: 21000-21100): $UDP_RANGE"
+  echo "$(trmsg "[오류] udp-range 형식이 아닙니다(예: 21000-21100): $UDP_RANGE" "[ERROR] udp-range must match the form 21000-21100: $UDP_RANGE")"
   exit 1
 fi
 
 TCP_START="${TCP_RANGE%-*}"; TCP_END="${TCP_RANGE#*-}"
 UDP_START="${UDP_RANGE%-*}"; UDP_END="${UDP_RANGE#*-}"
 
-echo "=== Tunneler 서버 세팅 시작 ==="
+echo "$(trmsg "=== Tunneler 서버 세팅 시작 ===" "=== Starting Tunneler Server Setup ===")"
 
 INSTALL_DIR="/opt/tunneler"
 mkdir -p "$INSTALL_DIR"
 
 # 패키지에 반드시 포함돼 있어야 함
 if [[ ! -f "$INSTALL_DIR/server.py" || ! -f "$INSTALL_DIR/requirements.txt" ]]; then
-  echo "[오류] $INSTALL_DIR/server.py 및 requirements.txt가 없습니다. 패키지 설치 상태를 확인하세요."
+  echo "$(trmsg "[오류] $INSTALL_DIR/server.py 및 requirements.txt가 없습니다. 패키지 설치 상태를 확인하세요." "[ERROR] $INSTALL_DIR/server.py and requirements.txt are missing. Check the package installation.")"
   exit 1
 fi
 
@@ -105,7 +119,7 @@ mkdir -p /etc/default
 if [[ -f "$ENV_FILE" ]]; then
   TS="$(date +%Y%m%d-%H%M%S)"
   cp -a "$ENV_FILE" "${ENV_FILE}.bak.${TS}" || true
-  echo "[INFO] 기존 $ENV_FILE 백업: ${ENV_FILE}.bak.${TS}"
+  echo "$(trmsg "[INFO] 기존 $ENV_FILE 백업: ${ENV_FILE}.bak.${TS}" "[INFO] Existing $ENV_FILE backed up to ${ENV_FILE}.bak.${TS}")"
 fi
 
 cat > "$ENV_FILE" <<EOF
@@ -234,7 +248,10 @@ server {
     client_max_body_size 64m;
   }
 
-  location = /_health { proxy_pass http://tunnel_app/_health; }
+  location = /_health {
+    proxy_set_header Authorization \$http_authorization;
+    proxy_pass http://tunnel_app/_health;
+  }
 }
 EOF
 
@@ -244,25 +261,25 @@ systemctl reload nginx
 # ==========================================================
 # ===== 방화벽: UFW만 사용 + iptables "복원/관리" 서비스 끄기 =====
 # ==========================================================
-echo "[FW] 정책: UFW만 사용(iptables 직접 관리/복원 서비스 비활성화)"
+echo "$(trmsg "[FW] 정책: UFW만 사용(iptables 직접 관리/복원 서비스 비활성화)" "[FW] Policy: use UFW only (iptables persistence/restore services disabled)")"
 echo "[FW] Open 80,443,${APP_PORT}; TCP ${TCP_START}-${TCP_END}; UDP ${UDP_START}-${UDP_END}"
 
 if ! command -v ufw >/dev/null 2>&1; then
-  echo "[WARN] ufw가 없습니다. 패키지 Depends에 ufw가 있어야 합니다."
-  echo "       수동 설치: sudo apt-get update && sudo apt-get install -y ufw"
+  echo "$(trmsg "[WARN] ufw가 없습니다. 패키지 Depends에 ufw가 있어야 합니다." "[WARN] ufw is missing. The package dependencies should include ufw.")"
+  echo "$(trmsg "       수동 설치: sudo apt-get update && sudo apt-get install -y ufw" "       Install manually: sudo apt-get update && sudo apt-get install -y ufw")"
 else
   # 1) iptables 규칙을 부팅 시 자동 복원하는 서비스 비활성화/마스킹(정석)
   if systemctl list-unit-files | grep -q '^netfilter-persistent\.service'; then
     systemctl stop netfilter-persistent.service || true
     systemctl disable netfilter-persistent.service || true
     systemctl mask netfilter-persistent.service || true
-    echo "[FW] netfilter-persistent.service disabled/masked"
+    echo "$(trmsg "[FW] netfilter-persistent.service disabled/masked" "[FW] netfilter-persistent.service disabled/masked")"
   fi
   if systemctl list-unit-files | grep -q '^iptables-persistent\.service'; then
     systemctl stop iptables-persistent.service || true
     systemctl disable iptables-persistent.service || true
     systemctl mask iptables-persistent.service || true
-    echo "[FW] iptables-persistent.service disabled/masked"
+    echo "$(trmsg "[FW] iptables-persistent.service disabled/masked" "[FW] iptables-persistent.service disabled/masked")"
   fi
 
   # 2) "외부가 안 들어오는" 꼬임이 있을 때만 정리 (무작정 flush 최소화)
@@ -283,7 +300,7 @@ else
   fi
 
   if [[ "$NEED_CLEAN" == "Y" ]]; then
-    echo "[FW] 감지: iptables/nft 꼬임(정책 DROP/REJECT). UFW 적용을 위해 정리합니다."
+    echo "$(trmsg "[FW] 감지: iptables/nft 꼬임(정책 DROP/REJECT). UFW 적용을 위해 정리합니다." "[FW] Detected conflicting iptables/nft policy (DROP/REJECT). Cleaning up before applying UFW.")"
 
     # nft policy drop 꼬임이면 flush ruleset (UFW가 다시 세팅)
     if command -v nft >/dev/null 2>&1; then
@@ -305,7 +322,7 @@ else
       iptables -P OUTPUT ACCEPT || true
     fi
   else
-    echo "[FW] iptables/nft 심각한 꼬임 미감지: flush 생략"
+    echo "$(trmsg "[FW] iptables/nft 심각한 꼬임 미감지: flush 생략" "[FW] No severe iptables/nft conflict detected: skipping flush")"
   fi
 
   # 3) UFW를 "UFW만" 상태로 재구성
@@ -335,12 +352,12 @@ fi
 # - certbot 없으면 설치하지 않고 경고만 (dpkg lock 방지)
 if [[ "${USE_LE^^}" == "Y" ]]; then
   if ! command -v certbot >/dev/null 2>&1; then
-    echo "[WARN] certbot이 설치되어 있지 않습니다. HTTPS 자동 설정을 건너뜁니다."
-    echo "       (권장) sudo apt install certbot python3-certbot-nginx"
+    echo "$(trmsg "[WARN] certbot이 설치되어 있지 않습니다. HTTPS 자동 설정을 건너뜁니다." "[WARN] certbot is not installed. Skipping automatic HTTPS setup.")"
+    echo "$(trmsg "       (권장) sudo apt install certbot python3-certbot-nginx" "       Recommended: sudo apt install certbot python3-certbot-nginx")"
   else
-    echo "[LE] 사전 점검: nginx 80 리스닝 확인"
+    echo "$(trmsg "[LE] 사전 점검: nginx 80 리스닝 확인" "[LE] Pre-check: verifying nginx is listening on port 80")"
     if ! ss -lntp | grep -q ':80 '; then
-      echo "[ERROR] nginx가 80 포트를 리슨하지 않습니다. certbot을 진행할 수 없습니다."
+      echo "$(trmsg "[ERROR] nginx가 80 포트를 리슨하지 않습니다. certbot을 진행할 수 없습니다." "[ERROR] nginx is not listening on port 80. certbot cannot continue.")"
       exit 1
     fi
 
@@ -356,15 +373,15 @@ if [[ "${USE_LE^^}" == "Y" ]]; then
 fi
 
 # ===== 헬스 체크 =====
-echo "[CHECK] 백엔드 헬스 확인..."
+echo "$(trmsg "[CHECK] 백엔드 헬스 확인..." "[CHECK] Verifying backend health...")"
 if curl -fsS "http://127.0.0.1:${APP_PORT}/login" >/dev/null 2>&1; then
-  echo "[OK] 백엔드 응답 정상"
+  echo "$(trmsg "[OK] 백엔드 응답 정상" "[OK] Backend responded successfully")"
 else
-  echo "[WARN] 백엔드 200 응답 없음. 다음을 확인:"
+  echo "$(trmsg "[WARN] 백엔드 200 응답 없음. 다음을 확인:" "[WARN] Backend did not return HTTP 200. Check the following:")"
   echo "  - systemctl status tunneler-server -l"
   echo "  - journalctl -u tunneler-server -n 200"
 fi
 
-echo "=== Tunneler 서버 세팅 완료 ==="
-echo "- 관리자 대시보드: http://${DOMAIN}/dashboard (또는 https) 로 접속하십시오."
-echo "- 클라이언트 터널 접속 URI : ${DOMAIN}"
+echo "$(trmsg "=== Tunneler 서버 세팅 완료 ===" "=== Tunneler Server Setup Complete ===")"
+echo "$(trmsg "- 관리자 대시보드: http://${DOMAIN}/dashboard (또는 https) 로 접속하십시오." "- Admin dashboard: open http://${DOMAIN}/dashboard (or https).")"
+echo "$(trmsg "- 클라이언트 터널 접속 URI : ${DOMAIN}" "- Client tunnel endpoint: ${DOMAIN}")"

@@ -2,6 +2,20 @@
 # Tunneler Client Full Setup Script (Wrapper Version)
 set -euo pipefail
 
+detect_ui_lang() {
+  local locale="${LC_ALL:-${LANG:-${LANGUAGE:-en}}}"
+  locale="$(printf '%s' "$locale" | tr '[:upper:]' '[:lower:]')"
+  [[ "$locale" == ko* ]] && printf 'ko' || printf 'en'
+}
+UI_LANG="$(detect_ui_lang)"
+trmsg() {
+  if [[ "$UI_LANG" == "ko" ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 # 1. 인자 초기화 및 파싱
 SERVER=""; SSL="false"; SUBDOMAIN=""; TOKEN=""; HTTP=""; TCP=""; UDP=""
 while [[ $# -gt 0 ]]; do
@@ -40,14 +54,14 @@ chmod 600 "$ENV_FILE"
 
 # 5. 가상환경(venv) 및 패키지 설치
 INSTALL_DIR="/opt/tunneler-client"
-echo "[INFO] 가상환경 설정 중..."
+echo "$(trmsg "[INFO] 가상환경 설정 중..." "[INFO] Preparing virtual environment...")"
 python3 -m venv "$INSTALL_DIR/.venv" || true
 "$INSTALL_DIR/.venv/bin/pip" install -U pip
 "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
 # 6. ✅ 핵심: start.sh 실행 래퍼 스크립트 생성
 # systemd 변수 확장 문제를 해결하기 위해 큰따옴표("")로 인자를 보호합니다.
-echo "[INFO] 실행 래퍼(start.sh) 생성 중..."
+echo "$(trmsg "[INFO] 실행 래퍼(start.sh) 생성 중..." "[INFO] Creating start wrapper (start.sh)...")"
 cat > "${INSTALL_DIR}/start.sh" <<'EOF'
 #!/bin/bash
 # 설정값 로드
@@ -65,7 +79,7 @@ chmod +x "${INSTALL_DIR}/start.sh"
 
 # 7. ✅ 핵심: Systemd 서비스 파일 생성
 # ExecStart가 파이썬이 아닌 start.sh를 바라보게 설정합니다.
-echo "[INFO] Systemd 서비스 등록 중..."
+echo "$(trmsg "[INFO] Systemd 서비스 등록 중..." "[INFO] Registering systemd service...")"
 SERVICE_FILE="/etc/systemd/system/tunneler-client.service"
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -88,4 +102,4 @@ EOF
 systemctl daemon-reload
 systemctl enable --now tunneler-client
 
-echo "[SUCCESS] Tunneler 클라이언트 설치 및 서비스 시작 완료!"
+echo "$(trmsg "[SUCCESS] Tunneler 클라이언트 설치 및 서비스 시작 완료!" "[SUCCESS] Tunneler client installation completed and service started.")"

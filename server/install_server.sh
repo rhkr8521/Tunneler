@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+detect_ui_lang() {
+  local locale="${LC_ALL:-${LANG:-${LANGUAGE:-en}}}"
+  locale="$(printf '%s' "$locale" | tr '[:upper:]' '[:lower:]')"
+  [[ "$locale" == ko* ]] && printf 'ko' || printf 'en'
+}
+UI_LANG="$(detect_ui_lang)"
+trmsg() {
+  if [[ "$UI_LANG" == "ko" ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 if [[ $EUID -ne 0 ]]; then
-  echo "root로 실행하세요. 예) sudo bash $0"
+  echo "$(trmsg "root로 실행하세요. 예) sudo bash $0" "Run as root. Example: sudo bash $0")"
   exit 1
 fi
 
-echo "=== Tunneler 서버 설치 ==="
+echo "$(trmsg "=== Tunneler 서버 설치 ===" "=== Tunneler Server Installation ===")"
 
 # OS 정보
 ID=""; VERSION_ID=""
@@ -27,7 +41,7 @@ INSTALL_PERSISTENT_PKGS=1
 if [[ "${ID}" == "ubuntu" && -n "${UBU_MAJOR}" && "${UBU_MAJOR}" -ge 24 ]]; then
   if dpkg -s ufw >/dev/null 2>&1; then
     INSTALL_PERSISTENT_PKGS=0
-    echo "[INFO] Ubuntu ${VERSION_ID} + UFW 환경: iptables-persistent/netfilter-persistent 설치를 건너뜀"
+    echo "$(trmsg "[INFO] Ubuntu ${VERSION_ID} + UFW 환경: iptables-persistent/netfilter-persistent 설치를 건너뜀" "[INFO] Ubuntu ${VERSION_ID} + UFW detected: skipping iptables-persistent/netfilter-persistent installation")"
   fi
 fi
 
@@ -37,13 +51,13 @@ if [[ $INSTALL_PERSISTENT_PKGS -eq 1 ]]; then
   RC=$?
   set -e
   if [[ $RC -ne 0 ]]; then
-    echo "[WARN] iptables-persistent/netfilter-persistent 설치 실패: 계속 진행합니다(방화벽 영구 저장은 스킵)."
+    echo "$(trmsg "[WARN] iptables-persistent/netfilter-persistent 설치 실패: 계속 진행합니다(방화벽 영구 저장은 스킵)." "[WARN] Failed to install iptables-persistent/netfilter-persistent. Continuing without persistent firewall save.")"
   fi
 fi
 
 INSTALL_DIR="/opt/tunneler"
 mkdir -p "$INSTALL_DIR"
-[[ -f server.py && -f requirements.txt ]] || { echo "[오류] server.py/requirements.txt 가 현재 디렉토리에 필요합니다"; exit 1; }
+[[ -f server.py && -f requirements.txt ]] || { echo "$(trmsg "[오류] server.py/requirements.txt 가 현재 디렉토리에 필요합니다" "[ERROR] server.py and requirements.txt must exist in the current directory.")"; exit 1; }
 cp -f server.py requirements.txt "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
 
@@ -62,15 +76,15 @@ pip install -U pip
 pip install -r "$INSTALL_DIR/requirements.txt"
 deactivate
 
-read -rp "서버 도메인 (예: example.com): " DOMAIN
-read -rp "와일드카드 서브도메인 사용? (*.${DOMAIN}) [Y/n]: " WCSUB; WCSUB=${WCSUB:-Y}
-read -rp "서버 실행 포트(기본 8080): " APP_PORT; APP_PORT=${APP_PORT:-8080}
-read -rp "TCP 포트 범위(기본 20000-20100): " TCP_RANGE; TCP_RANGE=${TCP_RANGE:-20000-20100}
-read -rp "UDP 포트 범위(기본 21000-21100): " UDP_RANGE; UDP_RANGE=${UDP_RANGE:-21000-21100}
-read -rp "초기 토큰 화이트리스트(쉼표, 비우면 무인증 허용): " TOKENS; TOKENS=${TOKENS:-}
-read -rp "관리자 대시보드 아이디: " ADMIN_ID
-read -rp "관리자 대시보드 비밀번호: " ADMIN_PW
-read -rp "Let’s Encrypt로 HTTPS 설정? [y/N]: " USE_LE; USE_LE=${USE_LE:-N}
+read -rp "$(trmsg "서버 도메인 (예: example.com): " "Server domain (e.g. example.com): ")" DOMAIN
+read -rp "$(trmsg "와일드카드 서브도메인 사용? (*.${DOMAIN}) [Y/n]: " "Use wildcard subdomains? (*.${DOMAIN}) [Y/n]: ")" WCSUB; WCSUB=${WCSUB:-Y}
+read -rp "$(trmsg "서버 실행 포트(기본 8080): " "Server listen port (default 8080): ")" APP_PORT; APP_PORT=${APP_PORT:-8080}
+read -rp "$(trmsg "TCP 포트 범위(기본 20000-20100): " "TCP port range (default 20000-20100): ")" TCP_RANGE; TCP_RANGE=${TCP_RANGE:-20000-20100}
+read -rp "$(trmsg "UDP 포트 범위(기본 21000-21100): " "UDP port range (default 21000-21100): ")" UDP_RANGE; UDP_RANGE=${UDP_RANGE:-21000-21100}
+read -rp "$(trmsg "초기 토큰 화이트리스트(쉼표, 비우면 무인증 허용): " "Initial token whitelist (comma-separated, empty allows unauthenticated registration): ")" TOKENS; TOKENS=${TOKENS:-}
+read -rp "$(trmsg "관리자 대시보드 아이디: " "Admin dashboard ID: ")" ADMIN_ID
+read -rp "$(trmsg "관리자 대시보드 비밀번호: " "Admin dashboard password: ")" ADMIN_PW
+read -rp "$(trmsg "Let’s Encrypt로 HTTPS 설정? [y/N]: " "Enable HTTPS with Let's Encrypt? [y/N]: ")" USE_LE; USE_LE=${USE_LE:-N}
 
 # 토큰/관리 상태 파일
 echo "${TOKENS}" > /opt/tunneler/tokens.txt
@@ -223,7 +237,10 @@ server {
     client_max_body_size 64m;
   }
 
-  location = /_health { proxy_pass http://tunnel_app/_health; }
+  location = /_health {
+    proxy_set_header Authorization \$http_authorization;
+    proxy_pass http://tunnel_app/_health;
+  }
 }
 EOF
 
@@ -245,8 +262,8 @@ if command -v iptables >/dev/null 2>&1; then
   if command -v netfilter-persistent >/dev/null 2>&1; then
     netfilter-persistent save || true
   else
-    echo "[INFO] netfilter-persistent 없음: iptables 규칙은 재부팅 시 사라질 수 있습니다."
-    echo "       지속성을 원하면 'ufw enable' 또는 netfilter-persistent 설치를 검토하세요."
+    echo "$(trmsg "[INFO] netfilter-persistent 없음: iptables 규칙은 재부팅 시 사라질 수 있습니다." "[INFO] netfilter-persistent is not installed: iptables rules may disappear after reboot.")"
+    echo "$(trmsg "       지속성을 원하면 'ufw enable' 또는 netfilter-persistent 설치를 검토하세요." "       For persistence, enable UFW or install netfilter-persistent.")"
   fi
 fi
 
@@ -258,7 +275,7 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow ${TCP_START}:${TCP_END}/tcp || true
   ufw allow ${UDP_START}:${UDP_END}/udp || true
   ufw reload || true
-  echo "[INFO] UFW가 비활성화 상태라면 'ufw enable'로 켜야 재부팅 후에도 규칙이 유지됩니다."
+  echo "$(trmsg "[INFO] UFW가 비활성화 상태라면 'ufw enable'로 켜야 재부팅 후에도 규칙이 유지됩니다." "[INFO] If UFW is disabled, run 'ufw enable' so rules survive reboot.")"
 fi
 
 # HTTPS(선택)
@@ -269,15 +286,15 @@ if [[ "${USE_LE^^}" == "Y" ]]; then
 fi
 
 # 헬스 체크
-echo "[CHECK] 백엔드 헬스 확인..."
+echo "$(trmsg "[CHECK] 백엔드 헬스 확인..." "[CHECK] Verifying backend health...")"
 if curl -fsS "http://${DOMAIN}/login" >/dev/null 2>&1; then
-  echo "[OK] 백엔드 응답 정상"
+  echo "$(trmsg "[OK] 백엔드 응답 정상" "[OK] Backend responded successfully")"
 else
-  echo "[WARN] 백엔드 200 응답 없음. 다음을 확인하세요:"
+  echo "$(trmsg "[WARN] 백엔드 200 응답 없음. 다음을 확인하세요:" "[WARN] Backend did not return HTTP 200. Check the following:")"
   echo "  - systemctl status tunneler-server -l"
   echo "  - journalctl -u tunneler-server -n 200"
 fi
 
-echo "=== 설치 완료 ==="
-echo "- 관리자 대시보드: http://${DOMAIN}/dashboard  (또는 https)"
-echo "- ID/비번: 설치 시 입력값 (브라우저 Basic Auth)"
+echo "$(trmsg "=== 설치 완료 ===" "=== Installation Complete ===")"
+echo "$(trmsg "- 관리자 대시보드: http://${DOMAIN}/dashboard  (또는 https)" "- Admin dashboard: http://${DOMAIN}/dashboard (or https)")"
+echo "$(trmsg "- ID/비번: 설치 시 입력값 (브라우저 Basic Auth)" "- ID/password: the values entered during installation (browser login)")"

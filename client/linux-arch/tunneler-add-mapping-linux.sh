@@ -133,8 +133,7 @@ HOSTPORT="$(echo "${WS_URL}" | sed -E 's#^(ws|wss)://##' | cut -d'/' -f1)"
 [[ "$SCHEME" == "wss" ]] && BASE="https://${HOSTPORT}" || BASE="http://${HOSTPORT}"
 
 set +e
-TOKEN_ENC="$(jq -rn --arg v "$TOKEN" '$v|@uri')"
-HEALTH_JSON="$(curl -ksS --max-time 5 "${BASE}/_health?token=${TOKEN_ENC}")"
+HEALTH_JSON="$(curl -ksS --max-time 5 -H "Authorization: Bearer ${TOKEN}" "${BASE}/_health")"
 if [[ -n "$TOKEN" && $? -eq 0 && -n "$HEALTH_JSON" ]]; then
   echo "$HEALTH_JSON" | jq -r --arg sd "$SUBDOMAIN" '
     .tunnels[$sd] as $t

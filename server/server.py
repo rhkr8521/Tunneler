@@ -72,6 +72,9 @@ def app_version(default: str="dev") -> str:
     return default
 
 APP_VERSION = app_version()
+REGISTRATION_ALERT_LIMIT = max(10, int(os.getenv("REGISTRATION_ALERT_LIMIT", "40")))
+REGISTRATION_ALERT_DEDUPE_SECONDS = max(15, int(os.getenv("REGISTRATION_ALERT_DEDUPE_SECONDS", "90")))
+REGISTRATION_ALERT_THROTTLE: Dict[str, float] = {}
 
 # 실시간 대역폭(초당 누적)
 _bw_counters: Dict[str, Dict[str, int]] = {}
@@ -289,6 +292,7 @@ def load_state():
             "per_tunnel_ip_deny": {},
             "token_meta": {},
             "revoked_tokens": [],
+            "registration_alerts": [],
             "tunnel_ip_deny": [],
             "per_tunnel_limits": {},
             "managed_mappings": {},
@@ -304,6 +308,7 @@ def load_state():
             s.setdefault("per_tunnel_ip_deny",{})
             s.setdefault("token_meta",{})
             s.setdefault("revoked_tokens",[])
+            s.setdefault("registration_alerts",[])
             s.setdefault("tunnel_ip_deny",[])
             s.setdefault("per_tunnel_limits",{})
             s.setdefault("managed_mappings",{})
@@ -318,6 +323,7 @@ def load_state():
             "per_tunnel_ip_deny": {},
             "token_meta": {},
             "revoked_tokens": [],
+            "registration_alerts": [],
             "tunnel_ip_deny": [],
             "per_tunnel_limits": {},
             "managed_mappings": {},
@@ -654,6 +660,95 @@ def touch_token_meta(token: str, ip: str):
     }
     save_state(STATE)
 
+def validate_registration_configs(configs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    valid = []
+    issues: List[Dict[str, str]] = []
+    seen = set()
+    for cfg in configs or []:
+        name = str(cfg.get("name") or "").strip()
+        if not name:
+            issues.append({"name": "", "issue": "missing_name"})
+            continue
+        if not name.isidentifier():
+            issues.append({"name": name, "issue": "invalid_name"})
+            continue
+        if name in seen:
+            issues.append({"name": name, "issue": "duplicate_name"})
+            continue
+        seen.add(name)
+        valid.append(cfg)
+    return valid, issues
+
+def registration_issue_message(issue: str) -> str:
+    labels = {
+        "missing_name": "이름이 비어 있습니다.",
+        "invalid_name": "이름은 영문/숫자/밑줄만 사용할 수 있고 숫자로 시작할 수 없습니다.",
+        "duplicate_name": "같은 이름이 중복되어 있습니다.",
+    }
+    return labels.get(issue, issue or "알 수 없는 오류")
+
+def registration_failure_message(reason: str, details: Optional[Dict[str, Any]]=None) -> str:
+    messages = {
+        "bad_subdomain": "서브도메인은 영문과 숫자만 사용할 수 있습니다.",
+        "invalid_mapping_config": "클라이언트 등록 포트 이름 설정이 올바르지 않습니다.",
+        "time_forbidden": "현재 시간대 정책상 이 클라이언트는 등록이 허용되지 않습니다.",
+        "quota_exceeded": "설정된 대역폭 제한을 초과해 등록이 차단되었습니다.",
+        "unauthorized": "등록 토큰이 허용 목록과 일치하지 않습니다.",
+        "token_revoked": "이미 무효화된 토큰이라 등록할 수 없습니다.",
+    }
+    if reason == "invalid_mapping_config":
+        tcp_count = len((details or {}).get("tcp") or [])
+        udp_count = len((details or {}).get("udp") or [])
+        parts = []
+        if tcp_count:
+            parts.append(f"TCP {tcp_count}건")
+        if udp_count:
+            parts.append(f"UDP {udp_count}건")
+        if parts:
+            return f"클라이언트 등록 포트 이름 설정이 올바르지 않습니다. ({', '.join(parts)})"
+    return messages.get(reason, f"클라이언트 등록이 거부되었습니다. ({reason})")
+
+def record_registration_alert(
+    peer_ip: str,
+    token: str,
+    subdomain: Optional[str],
+    reason: str,
+    details: Optional[Dict[str, Any]]=None,
+) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    signature = json.dumps({
+        "peer_ip": peer_ip or "",
+        "token": token or "",
+        "subdomain": (subdomain or "").strip(),
+        "reason": reason,
+        "details": details or {},
+    }, ensure_ascii=False, sort_keys=True)
+    if now - REGISTRATION_ALERT_THROTTLE.get(signature, 0.0) < REGISTRATION_ALERT_DEDUPE_SECONDS:
+        return None
+    REGISTRATION_ALERT_THROTTLE[signature] = now
+    stale_keys = [key for key, ts in REGISTRATION_ALERT_THROTTLE.items() if now - ts > REGISTRATION_ALERT_DEDUPE_SECONDS * 4]
+    for key in stale_keys:
+        REGISTRATION_ALERT_THROTTLE.pop(key, None)
+
+    entry = {
+        "id": uuid.uuid4().hex,
+        "at": datetime.datetime.now().replace(microsecond=0).isoformat(),
+        "peer_ip": peer_ip or "",
+        "token": token or "",
+        "subdomain": (subdomain or "").strip(),
+        "reason": reason,
+        "message": registration_failure_message(reason, details),
+        "details": details or {},
+    }
+    alerts = STATE.setdefault("registration_alerts", [])
+    alerts.append(entry)
+    if len(alerts) > REGISTRATION_ALERT_LIMIT:
+        del alerts[:-REGISTRATION_ALERT_LIMIT]
+    save_state(STATE)
+    ring_log(f"REGISTER FAIL sub={entry['subdomain'] or '-'} peer={peer_ip or '-'} reason={reason}")
+    broadcast({"kind":"registration_alert","alert":entry})
+    return entry
+
 # ===== 대역폭 제한 =====
 def _current_usage_of(sub: str):
     day, week, month = _date_keys()
@@ -715,6 +810,7 @@ def dashboard_snapshot_payload() -> Dict[str, Any]:
         "bot_blocking": normalized_bot_blocking(STATE.get("bot_blocking")),
         "tokens": sorted(ALLOWED_TOKENS),
         "token_meta": token_meta_items(),
+        "registration_alerts": list(STATE.get("registration_alerts", [])[-REGISTRATION_ALERT_LIMIT:]),
         "tunnel_ip_deny": sorted(STATE.get("tunnel_ip_deny", [])),
         "server_time": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "tunnels": {
@@ -747,6 +843,12 @@ def dashboard_snapshot_payload() -> Dict[str, Any]:
 
 async def send_dashboard_snapshot(ws: web.WebSocketResponse):
     await ws.send_json({"kind": "dashboard_snapshot", "snapshot": dashboard_snapshot_payload()})
+
+def parse_bearer_token(request: web.Request) -> str:
+    auth = (request.headers.get("Authorization", "") or "").strip()
+    if not auth or not auth.lower().startswith("bearer "):
+        return ""
+    return auth.split(" ", 1)[1].strip()
 
 def parse_basic_auth(request: web.Request) -> bool:
     if not ADMIN_USER or not ADMIN_PASS: return False
@@ -1121,32 +1223,82 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
                 # ----- 등록 -----
                 if mtype == "register":
-                    candidate = data.get("subdomain")
-                    auth_token = data.get("auth_token","")
-                    tcp_cfgs = [
+                    candidate = str(data.get("subdomain") or "").strip()
+                    auth_token = str(data.get("auth_token","") or "").strip()
+                    raw_tcp_cfgs = [
                         cfg for cfg in (data.get("tcp_configs",[]) or [])
                         if cfg.get("name") and not mapping_suppressed(candidate or "", "tcp", cfg.get("name"))
                     ]
-                    udp_cfgs = [
+                    raw_udp_cfgs = [
                         cfg for cfg in (data.get("udp_configs",[]) or [])
                         if cfg.get("name") and not mapping_suppressed(candidate or "", "udp", cfg.get("name"))
                     ]
+                    tcp_cfgs, tcp_issues = validate_registration_configs(raw_tcp_cfgs)
+                    udp_cfgs, udp_issues = validate_registration_configs(raw_udp_cfgs)
                     managed_tcp_cfgs = []
                     managed_udp_cfgs = []
 
                     if not candidate or not candidate.isalnum():
-                        await ws.send_json({"type":"register_result","ok":False,"reason":"bad_subdomain"}); continue
+                        details = {"subdomain": candidate}
+                        alert = record_registration_alert(peer, auth_token, candidate, "bad_subdomain", details)
+                        await ws.send_json({
+                            "type":"register_result",
+                            "ok":False,
+                            "reason":"bad_subdomain",
+                            "message": (alert or {}).get("message") or registration_failure_message("bad_subdomain", details),
+                            "details": details,
+                        })
+                        continue
+                    if tcp_issues or udp_issues:
+                        details = {}
+                        if tcp_issues:
+                            details["tcp"] = tcp_issues
+                        if udp_issues:
+                            details["udp"] = udp_issues
+                        alert = record_registration_alert(peer, auth_token, candidate, "invalid_mapping_config", details)
+                        await ws.send_json({
+                            "type":"register_result",
+                            "ok":False,
+                            "reason":"invalid_mapping_config",
+                            "message": (alert or {}).get("message") or registration_failure_message("invalid_mapping_config", details),
+                            "details": details,
+                        })
+                        continue
                     managed_tcp_cfgs = iter_managed_configs(candidate, "tcp")
                     managed_udp_cfgs = iter_managed_configs(candidate, "udp")
 
                     if not access_allowed_for(candidate):
-                        await ws.send_json({"type":"register_result","ok":False,"reason":"time_forbidden"}); continue
+                        alert = record_registration_alert(peer, auth_token, candidate, "time_forbidden", {"subdomain": candidate})
+                        await ws.send_json({
+                            "type":"register_result",
+                            "ok":False,
+                            "reason":"time_forbidden",
+                            "message": (alert or {}).get("message") or registration_failure_message("time_forbidden"),
+                            "details": {"subdomain": candidate},
+                        })
+                        continue
                     if not allowed_by_limit(candidate):
-                        await ws.send_json({"type":"register_result","ok":False,"reason":"quota_exceeded"}); continue
+                        alert = record_registration_alert(peer, auth_token, candidate, "quota_exceeded", {"subdomain": candidate})
+                        await ws.send_json({
+                            "type":"register_result",
+                            "ok":False,
+                            "reason":"quota_exceeded",
+                            "message": (alert or {}).get("message") or registration_failure_message("quota_exceeded"),
+                            "details": {"subdomain": candidate},
+                        })
+                        continue
 
                     ok, reason = verify_auth(auth_token)
                     if not ok:
-                        await ws.send_json({"type":"register_result","ok":False,"reason":reason}); continue
+                        alert = record_registration_alert(peer, auth_token, candidate, reason, {"subdomain": candidate})
+                        await ws.send_json({
+                            "type":"register_result",
+                            "ok":False,
+                            "reason":reason,
+                            "message": (alert or {}).get("message") or registration_failure_message(reason),
+                            "details": {"subdomain": candidate},
+                        })
+                        continue
 
                     touch_token_meta(auth_token, peer or "")
 
@@ -1297,9 +1449,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 # 공개 HTTP 프록시 + /_health
 async def public_http_handler(request: web.Request) -> web.StreamResponse:
     if request.path == "/_health":
-        token = (request.rel_url.query.get("token") or "").strip()
+        token = parse_bearer_token(request)
         if not token:
-            return web.json_response({"ok": False, "reason": "token_required"}, status=401)
+            return web.json_response({"ok": False, "reason": "bearer_token_required"}, status=401)
         allowed, reason = verify_auth(token)
         if not allowed:
             return web.json_response({"ok": False, "reason": reason or "unauthorized"}, status=403)
@@ -1458,6 +1610,38 @@ body{
     </section>
   </div>
   <script>
+  const UI_LANG = ((navigator.language || navigator.userLanguage || 'en').toLowerCase().startsWith('ko')) ? 'ko' : 'en';
+  document.documentElement.lang = UI_LANG;
+  const LOGIN_TEXT_EN = {
+    '관리자 로그인': 'Admin Sign In',
+    '설치 시 설정한 관리자 계정으로 로그인합니다.': 'Sign in with the administrator account configured during installation.',
+    '관리자 ID': 'Admin ID',
+    '비밀번호': 'Password',
+    '대시보드 열기': 'Open Dashboard',
+    '계정 정보가 올바르지 않습니다.': 'Invalid administrator credentials.',
+    'Tunneler Admin ERP Console': 'Tunneler Admin ERP Console',
+  };
+  function translateLoginText(value){
+    if(UI_LANG === 'ko') return value;
+    const raw = String(value ?? '');
+    const trimmed = raw.trim();
+    if(!trimmed) return raw;
+    let next = LOGIN_TEXT_EN[trimmed] || trimmed;
+    const fail = next.match(/^로그인 실패: (.+)$/);
+    if(fail) next = `Login failed: ${fail[1]}`;
+    return raw.replace(trimmed, next);
+  }
+  function localizeLogin(){
+    if(UI_LANG === 'ko') return;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while(walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(node=>{
+      if(!node.parentElement || ['SCRIPT','STYLE'].includes(node.parentElement.tagName)) return;
+      node.textContent = translateLoginText(node.textContent);
+    });
+  }
+  localizeLogin();
   document.getElementById('loginForm').addEventListener('submit', async (event)=>{
     event.preventDefault();
     const username = document.getElementById('username').value.trim();
@@ -1476,7 +1660,8 @@ body{
       }
       location.href = payload.redirect || '/dashboard';
     }catch(err){
-      error.textContent = err.message === 'invalid_credentials' ? '계정 정보가 올바르지 않습니다.' : `로그인 실패: ${err.message}`;
+      const message = err.message === 'invalid_credentials' ? '계정 정보가 올바르지 않습니다.' : `로그인 실패: ${err.message}`;
+      error.textContent = translateLoginText(message);
     }
   });
   </script>
@@ -1943,11 +2128,288 @@ button,input,select,textarea{font:inherit}
 </div>
 
 <script>
+const UI_LANG = ((navigator.language || navigator.userLanguage || 'en').toLowerCase().startsWith('ko')) ? 'ko' : 'en';
+document.documentElement.lang = UI_LANG;
 let ws;
 let lastSnapshot = null;
 let lastBandwidth = {items:{}, total:{tx:0, rx:0}};
 let snapshotWaiters = [];
 let globalDenyState = {page:1, query:''};
+let registrationAlertQueue = [];
+let registrationAlertActive = false;
+let activeRegistrationAlertId = '';
+let modalReturnStack = [];
+let modalJumping = false;
+const UI_TEXT_EN = {
+  '관리 항목을 왼쪽에서 선택하고, 활성 터널은 메인 대시보드에서 관리합니다.': 'Choose a section on the left and manage active tunnels from the main dashboard.',
+  '메인 대시보드': 'Main Dashboard',
+  '대시보드 접근 제한': 'Dashboard Access Control',
+  '클라이언트 토큰': 'Client Tokens',
+  '접속 허용 시간대': 'Allowed Access Schedule',
+  '전역 접근 차단': 'Global Access Blocks',
+  '봇 / 크롤러 차단': 'Bot / Crawler Blocking',
+  '실시간 대역폭': 'Live Throughput',
+  '로그 아카이브': 'Log Archive',
+  '활성 서브도메인': 'Active Subdomains',
+  '실시간 터널': 'Live Tunnels',
+  '집계 / 제한': 'Stats / Limits',
+  '이전 로그 보기': 'Load Logs',
+  '수동 새로고침': 'Refresh',
+  '로그아웃': 'Logout',
+  'TCP 포트 수': 'TCP Ports',
+  'UDP 포트 수': 'UDP Ports',
+  '현재 접속 IP': 'Active IPs',
+  '운영 토큰 수': 'Active Tokens',
+  '전역 차단 규칙': 'Global Block Rules',
+  '활성 터널': 'Active Tunnels',
+  '현재 연결된 클라이언트가 없습니다. 클라이언트가 다시 연결되면 여기서 포트와 IP를 바로 제어할 수 있습니다.': 'No connected clients right now. When a client reconnects, you can manage its ports and IPs here.',
+  '허용할 IP 또는 CIDR만 입력합니다. 비워두면 제한이 없습니다.': 'Enter allowed IPs or CIDR ranges only. Leave empty for no restriction.',
+  '허용 목록': 'Allow List',
+  '저장': 'Save',
+  '화이트리스트를 저장하고 즉시 무효화할 수 있습니다.': 'Save the whitelist and revoke tokens immediately.',
+  '토큰 목록': 'Token List',
+  '마지막 사용 내역 / 빠른 무효화': 'Last Seen / Quick Revoke',
+  '전역 정책입니다. 비워두면 24시간 허용됩니다.': 'Global policy. Leave empty to allow access 24/7.',
+  '시간대 편집': 'Edit Schedule',
+  '모든 터널에 공통 적용되는 외부 접근 IP/CIDR 차단 규칙입니다.': 'Global external IP/CIDR block rules applied to every tunnel.',
+  '새 차단 규칙': 'New Block Rule',
+  '등록 규칙 검색': 'Search Rules',
+  '전역 차단 추가': 'Add Global Block',
+  '검색': 'Search',
+  'HTTP User-Agent와 다중 포트/경로 스캔 패턴을 기준으로 HTTP, TCP, UDP 모두 차단합니다.': 'Blocks HTTP, TCP, and UDP traffic using HTTP User-Agent and multi-port/path scan patterns.',
+  '봇 차단 활성화': 'Enable Bot Blocking',
+  '빈 User-Agent 즉시 차단(HTTP)': 'Immediately Block Empty User-Agent (HTTP)',
+  '차단 키워드': 'Block Keywords',
+  '봇 차단 저장': 'Save Bot Rules',
+  '초당 In / Out 트래픽을 터널별로 집계합니다.': 'Shows per-tunnel In / Out traffic per second.',
+  '기본은 tail 미리보기만 빠르게 로드하고, 필요할 때 전체 로그를 다시 읽습니다.': 'Loads a fast tail preview by default and only reads the full log when needed.',
+  '로그 선택': 'Select Log',
+  '선택 로그 보기': 'Open Selected Log',
+  '실시간 로그 지우기': 'Clear Live Logs',
+  '연결 상태와 제어 기능을 한 곳에서 관리합니다.': 'Manage connection state and controls in one place.',
+  '제어 작업': 'Actions',
+  '버튼을 분리해두지 않고 이 모달에서 일괄 제어합니다.': 'All controls are grouped in this modal.',
+  '제한': 'Limits',
+  '대역폭 제한 저장': 'Save Bandwidth Limits',
+  '시간대': 'Schedule',
+  '허용 시간대 설정': 'Configure Access Schedule',
+  '포트 관리': 'Port Management',
+  '추가 / 삭제 즉시 반영': 'Add or Remove Immediately',
+  '접속 IP': 'Connected IPs',
+  '실시간 차단 / 해제': 'Block or Unblock Immediately',
+  '재연결': 'Restart',
+  '클라이언트 프로그램 재시작': 'Restart the Client Program',
+  '현재 세션만 대기 상태 전환': 'Put Only the Current Session on Hold',
+  '현재 포트': 'Current Ports',
+  '포트 관리에서 추가/삭제하면 연결 중인 클라이언트에도 즉시 전달됩니다.': 'Port changes are sent to the connected client immediately.',
+  '등록된 TCP 포트가 없습니다.': 'No TCP ports registered.',
+  '등록된 UDP 포트가 없습니다.': 'No UDP ports registered.',
+  '실시간 포트 관리': 'Live Port Management',
+  '추가 또는 삭제하면 연결 중인 클라이언트에 즉시 전달되고, 재연결 이후에도 서버 상태가 유지됩니다.': 'Changes are sent to the connected client immediately and remain after reconnect.',
+  '삭제 후 숨김 유지 중인 클라이언트 포트:': 'Client-defined ports kept hidden after removal:',
+  '서버 등록 포트': 'Server-managed Port',
+  '클라이언트 등록 포트': 'Client-managed Port',
+  '새 포트 추가': 'Add New Port',
+  '클라이언트 내부 대상과 서버 공개 포트를 함께 등록합니다.': 'Register the client target and public server port together.',
+  '프로토콜': 'Protocol',
+  '매핑 이름': 'Mapping Name',
+  '클라이언트 내부 호스트': 'Client Internal Host',
+  '클라이언트 내부 포트': 'Client Internal Port',
+  '서버 공개 포트(선택)': 'Public Server Port (Optional)',
+  '비워두면 자동 할당': 'Leave empty to auto-assign',
+  '안내': 'Note',
+  '삭제는 현재 클라이언트에도 제거 명령을 보내고, 추가는 즉시 새 리스너를 연결합니다.': 'Deleting sends a removal command to the client, and adding attaches a new listener immediately.',
+  '포트 추가': 'Add Port',
+  '현재 접속 중 IP': 'Current Connected IPs',
+  '차단하면 해당 IP의 현재 TCP/UDP 연결을 즉시 종료합니다.': 'Blocking immediately closes current TCP/UDP sessions for that IP.',
+  '최근 접속 히스토리': 'Recent Access History',
+  '날짜를 선택하면 해당 날짜의 접속 IP 목록을 별도 모달에서 페이지 단위로 확인합니다.': "Select a date to view that day's IP list in a paginated modal.",
+  '최근 접속 IP 검색': 'Search Recent IPs',
+  '현재 차단 목록': 'Current Block List',
+  '검색과 페이지 이동으로 길어진 차단 목록을 정리해서 확인합니다.': 'Use search and pagination to manage long block lists.',
+  '현재 이 터널에 연결 중인 IP': 'Currently connected to this tunnel',
+  '세션 상세': 'Session Details',
+  '즉시 차단': 'Block Now',
+  '차단 해제': 'Unblock',
+  '전역 차단': 'Global Block',
+  '전역 해제': 'Global Unblock',
+  '기록 없음': 'No History',
+  '기록 일수': 'Days with History',
+  '이전 달': 'Previous Month',
+  '다음 달': 'Next Month',
+  '차단 IP 검색': 'Search Blocked IPs',
+  '이 터널 전용 차단 규칙': 'Tunnel-only Block Rule',
+  '검색할 IP를 입력하세요.': 'Enter an IP to search.',
+  '최근 접속 검색 결과': 'Recent Access Search Results',
+  '선택한 날짜의 접속 IP를 페이지 단위로 확인합니다.': 'Review IPs for the selected date with pagination.',
+  '최근 접속 기록에서 IP를 검색합니다.': 'Search IPs in recent access history.',
+  '조건에 맞는 접속 기록이 없습니다.': 'No access records match the current filter.',
+  '집계를 볼 활성 터널이 없습니다.': 'No active tunnel is available for stats.',
+  '대상 서브도메인': 'Target Subdomain',
+  '단축 버튼 / 보기': 'Shortcuts / View',
+  '집계 보기': 'View Stats',
+  '제한 설정': 'Set Limits',
+  '그래프': 'Charts',
+  '표(숫자)': 'Table',
+  '일간(최근 30)': 'Daily (Last 30)',
+  '주간(최근 20)': 'Weekly (Last 20)',
+  '월간(최근 12)': 'Monthly (Last 12)',
+  '기간': 'Period',
+  '단위: 숫자+접미사(B/KB/MB/GB/TB). 비워두면 제한 없음.': 'Use number+unit (B/KB/MB/GB/TB). Leave empty for no limit.',
+  '일간': 'Daily',
+  '주간': 'Weekly',
+  '월간': 'Monthly',
+  '설정 없음 (24시간 허용)': 'No Schedule Configured (24h Allowed)',
+  '등록된 전역 차단 규칙이 없습니다.': 'No global block rules registered.',
+  '모든 터널에 공통 적용되는 전역 차단 규칙': 'Global block rule applied to all tunnels',
+  '해제': 'Remove',
+  '확인': 'Confirm',
+  '취소': 'Cancel',
+  '닫기': 'Close',
+  '선택된 로그가 없습니다.': 'No log is selected.',
+  '로그 로드 완료': 'Log loaded.',
+  '표시할 로그가 없습니다.': 'No logs to display.',
+  '시간대 정책을 저장했습니다.': 'Schedule saved.',
+  '집계 로드 완료': 'Stats loaded.',
+  '제한이 저장되었습니다.': 'Limits saved.',
+  '접근 허용 목록을 저장했습니다.': 'Allow list saved.',
+  '토큰 목록을 저장했습니다.': 'Token list saved.',
+  '전역 차단 규칙을 저장했습니다.': 'Global block rules saved.',
+  '전역 차단 규칙을 해제했습니다.': 'Global block rule removed.',
+  '봇 차단 정책을 저장했습니다.': 'Bot blocking rules saved.',
+  '실시간 로그를 비웠습니다.': 'Live logs cleared.',
+  'WS 스냅샷을 다시 요청했습니다.': 'Requested a fresh WS snapshot.',
+  '클라이언트 재시작을 요청했습니다.': 'Client restart requested.',
+  '클라이언트를 연결 해제 상태로 전환했습니다.': 'Client switched to disconnected hold mode.',
+  '클라이언트 등록 오류': 'Client Registration Error',
+  '등록이 거부되어 현재 대시보드에 터널이 생성되지 않았습니다.': 'Registration was rejected, so no tunnel was created on the dashboard.',
+  '입력한 서브도메인': 'Submitted Subdomain',
+  '사유 코드:': 'Reason Code:',
+  '(비어 있음)': '(empty)',
+  '서브도메인': 'Subdomain',
+  '시간': 'Time',
+};
+const UI_REGEX_EN = [
+  [/^로그인 실패: (.+)$/u, (_, detail) => `Login failed: ${detail}`],
+  [/^(.+) [/] (\d+) 페이지$/u, (_, page, total) => `Page ${page} / ${total}`],
+  [/^터널 관리 \((.+)\)$/u, (_, value) => `Tunnel Management (${value})`],
+  [/^포트 관리 \((.+)\)$/u, (_, value) => `Port Management (${value})`],
+  [/^접속 IP \((.+)\)$/u, (_, value) => `Connected IPs (${value})`],
+  [/^세션 상세 \((.+)\)$/u, (_, value) => `Session Details (${value})`],
+  [/^접속 기록 \((.+)\)$/u, (_, value) => `Access History (${value})`],
+  [/^접속 기록 검색 \((.+)\)$/u, (_, value) => `Access History Search (${value})`],
+  [/^대역폭 제한 \((.+)\)$/u, (_, value) => `Bandwidth Limits (${value})`],
+  [/^시간대 설정 \((.+)\)$/u, (_, value) => `Schedule Settings (${value})`],
+  [/^대역폭 집계[/]제한$/u, () => 'Bandwidth Stats / Limits'],
+  [/^(.+) 전역 차단 규칙을 해제할까요\?$/u, (_, rule) => `Remove global block rule ${rule}?`],
+  [/^(.+) 클라이언트를 재시작할까요\?$/u, (_, sub) => `Restart client ${sub}?`],
+  [/^(.+) 클라이언트를 현재 세션에서 대기 상태로 전환할까요\?$/u, (_, sub) => `Put client ${sub} into hold mode for the current session?`],
+  [/^다시 붙이려면 클라이언트 재부팅 또는 재연결 버튼 사용이 필요합니다\.$/u, () => 'To reconnect, reboot the client or use the restart button.'],
+  [/^(.+) 를 차단하고 현재 연결을 즉시 종료할까요\?$/u, (_, ip) => `Block ${ip} and close its current connections immediately?`],
+  [/^(.+) 를 전역 차단할까요\?$/u, (_, ip) => `Globally block ${ip}?`],
+  [/^모든 터널에서 즉시 연결이 차단됩니다\.$/u, () => 'Connections will be blocked immediately across all tunnels.'],
+  [/^(.+) (TCP|UDP) 포트를 삭제할까요\?$/u, (_, name, proto) => `Delete ${name} ${proto} port?`],
+  [/^현재 연결된 클라이언트에도 즉시 제거 명령을 보냅니다\.$/u, () => 'A remove command will also be sent to the connected client immediately.'],
+  [/^해당 토큰을 즉시 무효화할까요\?$/u, () => 'Revoke this token immediately?'],
+  [/^(.+) 를 차단했습니다\.$/u, (_, ip) => `Blocked ${ip}.`],
+  [/^(.+) 차단을 해제했습니다\.$/u, (_, ip) => `Unblocked ${ip}.`],
+  [/^(.+) 를 전역 차단했습니다\.$/u, (_, ip) => `Globally blocked ${ip}.`],
+  [/^(.+) 전역 차단을 해제했습니다\.$/u, (_, ip) => `Removed global block for ${ip}.`],
+  [/^IP 차단 실패: (.+)$/u, (_, reason) => `IP block failed: ${reason}`],
+  [/^차단 해제 실패: (.+)$/u, (_, reason) => `Unblock failed: ${reason}`],
+  [/^전역 차단 실패: (.+)$/u, (_, reason) => `Global block failed: ${reason}`],
+  [/^전역 차단 해제 실패: (.+)$/u, (_, reason) => `Global unblock failed: ${reason}`],
+  [/^포트 삭제 실패: (.+)$/u, (_, reason) => `Port removal failed: ${reason}`],
+  [/^포트 추가 실패: (.+)$/u, (_, reason) => `Port add failed: ${reason}`],
+  [/^(TCP|UDP) 포트 (\d+) 추가 완료$/u, (_, proto, port) => `${proto} port ${port} added.`],
+  [/^재연결 실패: (.+)$/u, (_, reason) => `Restart failed: ${reason}`],
+  [/^Disconnect 실패: (.+)$/u, (_, reason) => `Disconnect failed: ${reason}`],
+  [/^시간대 저장 실패: (.+)$/u, (_, reason) => `Schedule save failed: ${reason}`],
+  [/^전역 시간대 저장 실패: (.+)$/u, (_, reason) => `Global schedule save failed: ${reason}`],
+  [/^제한 저장 실패: (.+)$/u, (_, reason) => `Limit save failed: ${reason}`],
+  [/^허용 목록 저장 실패: (.+)$/u, (_, reason) => `Allow list save failed: ${reason}`],
+  [/^토큰 저장 실패: (.+)$/u, (_, reason) => `Token save failed: ${reason}`],
+  [/^전역 차단 저장 실패: (.+)$/u, (_, reason) => `Global block save failed: ${reason}`],
+  [/^전역 차단 해제 실패: (.+)$/u, (_, reason) => `Global unblock failed: ${reason}`],
+  [/^봇 차단 저장 실패: (.+)$/u, (_, reason) => `Bot blocking save failed: ${reason}`],
+  [/^로그 초기화 실패: (.+)$/u, (_, reason) => `Failed to clear live logs: ${reason}`],
+  [/^로그 로드 실패: (.+)$/u, (_, reason) => `Log load failed: ${reason}`],
+  [/^클라이언트 등록 오류가 감지되었습니다\.$/u, () => 'A client registration error was detected.'],
+  [/^토큰을 무효화했습니다\.$/u, () => 'Token revoked.'],
+  [/^토큰을 무효화했습니다\. 연결 (\d+)건을 종료했습니다\.$/u, (_, count) => `Token revoked. Closed ${count} connection(s).`],
+];
+function translateUiText(value){
+  if(UI_LANG === 'ko') return String(value ?? '');
+  const raw = String(value ?? '');
+  const trimmed = raw.trim();
+  if(!trimmed) return raw;
+  let next = UI_TEXT_EN[trimmed] || trimmed;
+  for(const [pattern, replacer] of UI_REGEX_EN){
+    if(pattern.test(next)){
+      next = next.replace(pattern, replacer);
+      break;
+    }
+  }
+  return raw.replace(trimmed, next);
+}
+function localizeElement(root){
+  if(UI_LANG === 'ko' || !root) return;
+  const base = root.nodeType === Node.ELEMENT_NODE ? root : root.parentElement;
+  if(base && base.nodeType === Node.ELEMENT_NODE && !['SCRIPT','STYLE','PRE','CODE','TEXTAREA'].includes(base.tagName)){
+    if(base.hasAttribute('placeholder')){
+      base.setAttribute('placeholder', translateUiText(base.getAttribute('placeholder')));
+    }
+    if(base.hasAttribute('title')){
+      base.setAttribute('title', translateUiText(base.getAttribute('title')));
+    }
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while(walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node=>{
+    const parent = node.parentElement;
+    if(!parent || ['SCRIPT','STYLE','PRE','CODE','TEXTAREA'].includes(parent.tagName)) return;
+    node.textContent = translateUiText(node.textContent);
+  });
+  if(root.querySelectorAll){
+    root.querySelectorAll('[placeholder],[title]').forEach(el=>{
+      if(el.hasAttribute('placeholder')){
+        el.setAttribute('placeholder', translateUiText(el.getAttribute('placeholder')));
+      }
+      if(el.hasAttribute('title')){
+        el.setAttribute('title', translateUiText(el.getAttribute('title')));
+      }
+    });
+  }
+}
+function startLocalizationObserver(){
+  if(UI_LANG === 'ko' || !document.body || window.__tunnelerLocalizationObserver) return;
+  const observer = new MutationObserver(records=>{
+    records.forEach(record=>{
+      record.addedNodes.forEach(node=>{
+        if(node.nodeType === Node.TEXT_NODE){
+          if(node.parentElement && !['SCRIPT','STYLE','PRE','CODE','TEXTAREA'].includes(node.parentElement.tagName)){
+            node.textContent = translateUiText(node.textContent);
+          }
+          return;
+        }
+        if(node.nodeType === Node.ELEMENT_NODE){
+          localizeElement(node);
+        }
+      });
+    });
+  });
+  observer.observe(document.body, {childList:true, subtree:true});
+  window.__tunnelerLocalizationObserver = observer;
+}
+const seenRegistrationAlerts = new Set((()=>{
+  try{
+    const raw = JSON.parse(sessionStorage.getItem('tunneler_seen_registration_alerts') || '[]');
+    return Array.isArray(raw) ? raw : [];
+  }catch(err){
+    return [];
+  }
+})());
 
 /* ===== 토스트/모달 유틸 ===== */
 function showToast(msg, type='info', ms=2200){
@@ -1956,37 +2418,68 @@ function showToast(msg, type='info', ms=2200){
   if(type==='ok'){ t.style.background='#065f46'; t.style.color='#ecfdf5'; }
   if(type==='warn'){ t.style.background='#78350f'; t.style.color='#fef3c7'; }
   if(type==='err'){ t.style.background='#7f1d1d'; t.style.color='#fee2e2'; }
-  t.textContent = msg;
+  t.textContent = translateUiText(msg);
   document.getElementById('toast').appendChild(t);
   setTimeout(()=>{ t.remove(); }, ms);
+}
+function settleModalTransition(result){
+  if(modalJumping) return;
+  const reopen = modalReturnStack.pop();
+  if(result === false && typeof reopen === 'function'){
+    setTimeout(reopen, 40);
+  }
 }
 function confirmAsync(message){
   return new Promise((resolve)=>{
     const ov = document.getElementById('modalOverlay');
-    document.getElementById('modalTitle').textContent = '확인';
+    document.getElementById('modalTitle').textContent = translateUiText('확인');
     document.getElementById('modalBody').innerHTML = `<div class="text-slate-700">${message}</div>`;
     const ok = document.getElementById('modalOk');
     const no = document.getElementById('modalCancel');
-    ok.textContent = '확인';
-    no.textContent = '취소';
-    const close = () => { ov.style.display='none'; ok.onclick=null; no.onclick=null; }
-    ok.onclick = ()=>{ resolve(true); close(); }
-    no.onclick = ()=>{ resolve(false); close(); }
+    ok.textContent = translateUiText('확인');
+    no.textContent = translateUiText('취소');
+    const close = (result) => { ov.style.display='none'; ok.onclick=null; no.onclick=null; settleModalTransition(result); }
+    ok.onclick = ()=>{ resolve(true); close(true); }
+    no.onclick = ()=>{ resolve(false); close(false); }
     ov.style.display='flex';
+    localizeElement(ov);
   });
 }
 function openCustomModal(title, html, okLabel='저장'){
   return new Promise((resolve)=>{
     const ov = document.getElementById('modalOverlay');
-    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalTitle').textContent = translateUiText(title);
     document.getElementById('modalBody').innerHTML = html;
-    const ok = document.getElementById('modalOk'); ok.textContent = okLabel;
+    const ok = document.getElementById('modalOk'); ok.textContent = translateUiText(okLabel);
     const no = document.getElementById('modalCancel');
-    no.textContent = '취소';
-    const close = () => { ov.style.display='none'; ok.onclick=null; no.onclick=null; }
-    ok.onclick = ()=>{ resolve(true); close(); }
-    no.onclick = ()=>{ resolve(false); close(); }
+    no.textContent = translateUiText('취소');
+    const close = (result) => { ov.style.display='none'; ok.onclick=null; no.onclick=null; settleModalTransition(result); }
+    ok.onclick = ()=>{ resolve(true); close(true); }
+    no.onclick = ()=>{ resolve(false); close(false); }
     ov.style.display='flex';
+    localizeElement(ov);
+  });
+}
+function openNoticeModal(title, html, okLabel='확인'){
+  return new Promise((resolve)=>{
+    const ov = document.getElementById('modalOverlay');
+    document.getElementById('modalTitle').textContent = translateUiText(title);
+    document.getElementById('modalBody').innerHTML = html;
+    const ok = document.getElementById('modalOk');
+    const no = document.getElementById('modalCancel');
+    ok.textContent = translateUiText(okLabel);
+    no.style.display = 'none';
+    const close = (result)=>{
+      ov.style.display='none';
+      ok.onclick=null;
+      no.onclick=null;
+      no.style.display = '';
+      settleModalTransition(result);
+    };
+    ok.onclick = ()=>{ resolve(true); close(true); };
+    no.onclick = ()=>{ resolve(false); close(false); };
+    ov.style.display='flex';
+    localizeElement(ov);
   });
 }
 function closeActiveModal(){
@@ -1997,9 +2490,24 @@ function closeActiveModal(){
   }
   document.getElementById('modalOverlay').style.display = 'none';
 }
-function jumpFromModal(next){
+function jumpFromModal(next, returnTo){
+  if(typeof returnTo === 'function'){
+    modalReturnStack.push(returnTo);
+  }
+  modalJumping = true;
   closeActiveModal();
-  setTimeout(next, 40);
+  setTimeout(async ()=>{
+    modalJumping = false;
+    try{
+      await next();
+    }catch(err){
+      const reopen = modalReturnStack.pop();
+      if(typeof reopen === 'function'){
+        setTimeout(reopen, 40);
+      }
+      showToast(err && err.message ? err.message : 'request_failed', 'err', 2800);
+    }
+  }, 40);
 }
 function switchSection(sectionId){
   document.querySelectorAll('.content-section').forEach(section=>{
@@ -2049,6 +2557,114 @@ function formatBytes(b){
   let i=0;
   while(b>=1024 && i<units.length-1){ b/=1024; i++; }
   return `${b.toFixed(i?2:0)} ${units[i]}`;
+}
+function maskToken(token){
+  const value = String(token || '');
+  if(!value) return '-';
+  if(value.length <= 10) return value;
+  return `${value.slice(0,4)}...${value.slice(-4)}`;
+}
+function registrationIssueLabel(issue){
+  const labels = {
+    missing_name: '이름이 비어 있습니다.',
+    invalid_name: '이름은 영문/숫자/밑줄만 사용할 수 있고 숫자로 시작할 수 없습니다.',
+    duplicate_name: '같은 이름이 중복되어 있습니다.',
+  };
+  return labels[issue] || issue || '알 수 없는 오류';
+}
+function renderRegistrationAlert(alert){
+  const details = alert.details || {};
+  const blocks = [];
+  if(Object.prototype.hasOwnProperty.call(details, 'subdomain')){
+    blocks.push(`
+      <div class="mapping-row">
+        <div class="mapping-meta">
+          <strong>입력한 서브도메인</strong>
+          <span>${escapeHtml(details.subdomain || '(비어 있음)')}</span>
+        </div>
+      </div>`);
+  }
+  ['tcp','udp'].forEach(proto=>{
+    const items = Array.isArray(details[proto]) ? details[proto] : [];
+    if(!items.length) return;
+    blocks.push(`
+      <div class="mapping-block">
+        <h4>${proto.toUpperCase()} 매핑 오류</h4>
+        <div class="mapping-list">
+          ${items.map(item=>`
+            <div class="mapping-row">
+              <div class="mapping-meta">
+                <strong>${escapeHtml(item.name || '(비어 있음)')}</strong>
+                <span>${escapeHtml(registrationIssueLabel(item.issue))}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>`);
+  });
+  return `
+    <div class="modal-stack">
+      <section class="panel" style="box-shadow:none">
+        <div class="panel-head">
+          <div>
+            <h3>${escapeHtml(alert.message || '클라이언트 등록 오류')}</h3>
+            <p>등록이 거부되어 현재 대시보드에 터널이 생성되지 않았습니다.</p>
+          </div>
+        </div>
+        <div class="meta-row">
+          <span class="pill">서브도메인 ${escapeHtml(alert.subdomain || '-')}</span>
+          <span class="pill">IP ${escapeHtml(alert.peer_ip || '-')}</span>
+          <span class="pill">토큰 ${escapeHtml(maskToken(alert.token))}</span>
+          <span class="pill">시간 ${escapeHtml(String(alert.at || '').replace('T',' '))}</span>
+        </div>
+        <div class="field-help" style="margin-top:14px">사유 코드: ${escapeHtml(alert.reason || '-')}</div>
+      </section>
+      ${blocks.join('')}
+    </div>`;
+}
+function persistSeenRegistrationAlerts(){
+  try{
+    const items = Array.from(seenRegistrationAlerts).slice(-120);
+    sessionStorage.setItem('tunneler_seen_registration_alerts', JSON.stringify(items));
+  }catch(err){}
+}
+function enqueueRegistrationAlerts(alerts){
+  const now = Date.now();
+  (alerts || []).forEach(alert=>{
+    if(!alert || !alert.id) return;
+    if(seenRegistrationAlerts.has(alert.id)) return;
+    if(activeRegistrationAlertId === alert.id) return;
+    if(registrationAlertQueue.some(item => item.id === alert.id)) return;
+    const at = Date.parse(alert.at || '');
+    if(Number.isFinite(at) && now - at > 15 * 60 * 1000) return;
+    registrationAlertQueue.push(alert);
+  });
+  registrationAlertQueue.sort((a,b)=> String(a.at || '').localeCompare(String(b.at || '')));
+  flushRegistrationAlertQueue();
+}
+async function flushRegistrationAlertQueue(){
+  if(registrationAlertActive || !registrationAlertQueue.length) return;
+  const overlay = document.getElementById('modalOverlay');
+  if(overlay && overlay.style.display === 'flex'){
+    setTimeout(flushRegistrationAlertQueue, 1200);
+    return;
+  }
+  registrationAlertActive = true;
+  const alert = registrationAlertQueue.shift();
+  activeRegistrationAlertId = alert && alert.id ? alert.id : '';
+  try{
+    await openNoticeModal('클라이언트 등록 오류', renderRegistrationAlert(alert), '확인');
+  }finally{
+    if(alert && alert.id){
+      seenRegistrationAlerts.add(alert.id);
+      persistSeenRegistrationAlerts();
+    }
+    activeRegistrationAlertId = '';
+    registrationAlertActive = false;
+    if(registrationAlertQueue.length){
+      setTimeout(flushRegistrationAlertQueue, 80);
+    }
+  }
 }
 function formatAxisBytes(b){
   b = Number(b||0);
@@ -2325,6 +2941,8 @@ function applyDashboardSnapshot(d){
   renderBandwidthTable();
   renderGlobalScheduleList(d);
   loadTokenMeta();
+  enqueueRegistrationAlerts(d.registration_alerts || []);
+  localizeElement(document.body);
 }
 
 async function requestDashboardSnapshot(timeout=2500){
@@ -2431,10 +3049,11 @@ async function openTunnelManageModal(sub){
     </div>`;
   const p = openCustomModal(`터널 관리 (${sub})`, html, '닫기');
   const body = document.getElementById('modalBody');
-  body.querySelector('[data-action="limit"]').onclick = ()=> jumpFromModal(()=> openLimitModal(sub));
-  body.querySelector('[data-action="schedule"]').onclick = ()=> jumpFromModal(()=> editTunnelSchedule(sub));
-  body.querySelector('[data-action="ports"]').onclick = ()=> jumpFromModal(()=> openPortManageModal(sub));
-  body.querySelector('[data-action="clients"]').onclick = ()=> jumpFromModal(()=> openClientsModal(sub));
+  const reopen = ()=> openTunnelManageModal(sub);
+  body.querySelector('[data-action="limit"]').onclick = ()=> jumpFromModal(()=> openLimitModal(sub), reopen);
+  body.querySelector('[data-action="schedule"]').onclick = ()=> jumpFromModal(()=> editTunnelSchedule(sub), reopen);
+  body.querySelector('[data-action="ports"]').onclick = ()=> jumpFromModal(()=> openPortManageModal(sub), reopen);
+  body.querySelector('[data-action="clients"]').onclick = ()=> jumpFromModal(()=> openClientsModal(sub), reopen);
   body.querySelector('[data-action="restart"]').onclick = ()=> jumpFromModal(async ()=>{
     const ok = await confirmAsync(`${escapeHtml(sub)} 클라이언트를 재시작할까요?`);
     if(!ok) return;
@@ -2445,7 +3064,7 @@ async function openTunnelManageModal(sub){
     }catch(err){
       showToast(`재연결 실패: ${err.message}`,'err',2800);
     }
-  });
+  }, reopen);
   body.querySelector('[data-action="disconnect"]').onclick = ()=> jumpFromModal(async ()=>{
     const ok = await confirmAsync(`${escapeHtml(sub)} 클라이언트를 현재 세션에서 대기 상태로 전환할까요?<br><br>다시 붙이려면 클라이언트 재부팅 또는 재연결 버튼 사용이 필요합니다.`);
     if(!ok) return;
@@ -2456,7 +3075,7 @@ async function openTunnelManageModal(sub){
     }catch(err){
       showToast(`Disconnect 실패: ${err.message}`,'err',2800);
     }
-  });
+  }, reopen);
   await p;
 }
 
@@ -2525,6 +3144,9 @@ function connectWS(){
           total: msg.total || {tx:0, rx:0},
         };
         renderBandwidthTable(lastBandwidth);
+      }else if(msg.kind==='registration_alert'){
+        enqueueRegistrationAlerts([msg.alert]);
+        showToast('클라이언트 등록 오류가 감지되었습니다.','err',3200);
       }else if(['register','unregister','assigned','refresh'].includes(msg.kind)){
         requestDashboardSnapshot().catch(()=>{});
       }else if(msg.kind==='snapshot_logs'){
@@ -2540,7 +3162,7 @@ function connectWS(){
 /* ===== 집계/제한 모달 ===== */
 let chartD=null, chartW=null, chartM=null;
 
-async function openAggModal(){
+async function openAggModal(initialSub=''){
   const subs = Object.keys((lastSnapshot&&lastSnapshot.tunnels)||{}).sort();
   if(!subs.length){
     showToast('집계를 볼 활성 터널이 없습니다.','warn');
@@ -2596,10 +3218,14 @@ async function openAggModal(){
     </div>`;
   const p = openCustomModal('대역폭 집계/제한', html, '닫기');
   document.getElementById('btnLoadAgg').onclick = ()=> renderAggCharts(document.getElementById('aggSub').value);
-  document.getElementById('btnSetLimit').onclick = ()=> jumpFromModal(()=> openLimitModal(document.getElementById('aggSub').value));
+  document.getElementById('aggSub').value = subs.includes(initialSub) ? initialSub : subs[0];
+  document.getElementById('btnSetLimit').onclick = ()=> {
+    const currentSub = document.getElementById('aggSub').value;
+    jumpFromModal(()=> openLimitModal(currentSub), ()=> openAggModal(currentSub));
+  };
   document.getElementById('btnViewGraph').onclick = ()=> { document.getElementById('aggGraphs').classList.remove('hidden'); document.getElementById('aggTables').classList.add('hidden'); };
   document.getElementById('btnViewTable').onclick = ()=> { document.getElementById('aggGraphs').classList.add('hidden'); document.getElementById('aggTables').classList.remove('hidden'); };
-  if(subs.length>0) renderAggCharts(subs[0]);
+  if(subs.length>0) renderAggCharts(document.getElementById('aggSub').value);
   await p;
 }
 
@@ -2718,7 +3344,7 @@ async function openLimitModal(sub){
 function openScheduleModal(sub, currentItems){
   return new Promise((resolve)=>{
     const ov = document.getElementById('modalOverlay');
-    document.getElementById('modalTitle').textContent = `시간대 설정 (${sub})`;
+    document.getElementById('modalTitle').textContent = translateUiText(`시간대 설정 (${sub})`);
     const seed = (currentItems||[]).map(x=>`${x.days||'all'} ${x.start||'00:00'}~${x.end||'23:59'}`).join('\\n');
     document.getElementById('modalBody').innerHTML = `
       <div class="space-y-2">
@@ -2727,17 +3353,18 @@ function openScheduleModal(sub, currentItems){
       </div>`;
     const ok = document.getElementById('modalOk');
     const no = document.getElementById('modalCancel');
-    const close = () => { ov.style.display='none'; ok.onclick=null; no.onclick=null; }
+    const close = (result) => { ov.style.display='none'; ok.onclick=null; no.onclick=null; settleModalTransition(result); }
     ok.onclick = ()=>{
       const raw = document.getElementById('schEdit').value.trim();
       const items = raw? raw.split(/\\n+/).map(s=>s.trim()).filter(Boolean).map(s=>{
         const m = s.match(/^(\\S+)\\s+(\\d{2}:\\d{2})~(\\d{2}:\\d{2})$/);
         if(!m) return null; return {days:m[1], start:m[2], end:m[3]};
       }).filter(Boolean) : [];
-      resolve(items); close();
+      resolve(items); close(true);
     };
-    no.onclick = ()=>{ resolve(null); close(); }
+    no.onclick = ()=>{ resolve(null); close(false); }
     ov.style.display='flex';
+    localizeElement(ov);
   });
 }
 
@@ -3511,6 +4138,8 @@ document.getElementById('refreshBtn').onclick = async ()=>{
 switchSection('overviewSection');
 renderBandwidthTable();
 loadLogList();
+localizeElement(document.body);
+startLocalizationObserver();
 connectWS();
 </script>
 </body></html>
