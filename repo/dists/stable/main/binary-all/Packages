@@ -1,29 +1,29 @@
 Package: tunneler-client
-Version: 2.0.7
+Version: 2.1.1
 Architecture: all
 Maintainer: rhkr8521 <rhkr8521@rhkr8521.com>
 Depends: bash, python3, python3-venv, python3-pip, systemd, debconf, curl
-Filename: pool/main/t/tunneler-client/tunneler-client_2.0.7_all.deb
-Size: 25238
-MD5sum: 1cb736275aca68948ae56e2839d163cd
-SHA1: 9b036324434b003ebe5c44a7b07dbad588070503
-SHA256: b3227662c6c6668a1bb17836306b223c0b8c20eb3db4b34889b6e36868226b93
+Filename: pool/main/t/tunneler-client/tunneler-client_2.1.1_all.deb
+Size: 26206
+MD5sum: 77a19318bc1a98464314b798f0fd698b
+SHA1: 2eb32544f1afe9cb1b981fcf3faec334c4779d11
+SHA256: 0119eeaedf9e2b0d7a300cb6fbd6c90ee80c90d35d1c50d95676eb58199ca6ba
 Section: net
 Priority: optional
 Description: Tunneler Client for TCP/UDP/HTTP Tunneling
  Installs Tunneler client as a systemd service with venv.
 
 Package: tunneler-server
-Version: 2.0.7
+Version: 2.1.1
 Architecture: all
 Maintainer: rhkr8521 <rhkr8521@rhkr8521.com>
 Depends: bash, nginx, ufw, curl, jq, python3, python3-venv, python3-pip, ca-certificates, systemd, debconf
 Recommends: certbot, python3-certbot-nginx
-Filename: pool/main/t/tunneler-server/tunneler-server_2.0.7_all.deb
-Size: 100358
-MD5sum: fafe19a8c9bbd5b4a27f85950c63457b
-SHA1: e2ab0c05c26b32b8b99e50377f188fd389458d65
-SHA256: a1d46c33e489992bde1d3b6a328af3799cc48848f66cff57eaaffa8854b0172f
+Filename: pool/main/t/tunneler-server/tunneler-server_2.1.1_all.deb
+Size: 110218
+MD5sum: 86435a518e6d259d0468b375d680bed7
+SHA1: 9067e5a3d5ebd4301b70e26b59875a8350c23089
+SHA256: 79ce7c55d858bfe9148bffe21b46c1c70bf3257958a53cf1e6f9605463228e5f
 Section: net
 Priority: optional
 Description: Tunneler Server with auto nginx/ufw/ssl setup
